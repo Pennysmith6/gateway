@@ -16,10 +16,10 @@ stats_config:
       {{- range $_, $item := .StatsMatcher.Exacts }}
       - exact: {{$item}}
       {{- end}}
-      {{- range $_, $item := .StatsMatcher.Prefixs }}
+      {{- range $_, $item := .StatsMatcher.Prefixes }}
       - prefix: {{$item}}
       {{- end}}
-      {{- range $_, $item := .StatsMatcher.Suffixs }}
+      {{- range $_, $item := .StatsMatcher.Suffixes }}
       - suffix: {{$item}}
       {{- end}}
       {{- range $_, $item := .StatsMatcher.RegularExpressions }}
@@ -65,15 +65,19 @@ static_resources:
   - name: envoy-gateway-proxy-ready-{{ .ReadyServer.Address }}-{{ .ReadyServer.Port }}
     address:
       socket_address:
-        address: {{ .ReadyServer.Address }}
+        address: '{{ .ReadyServer.Address }}'
         port_value: {{ .ReadyServer.Port }}
         protocol: TCP
+        {{- if eq .IPFamily "DualStack" "IPv6" }}
+        ipv4_compat: true
+        {{- end }}
     filter_chains:
     - filters:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
           stat_prefix: eg-ready-http
+          normalize_path: true
           route_config:
             name: local_route
             {{- if .EnablePrometheus }}
@@ -83,9 +87,35 @@ static_resources:
               - "*"
               routes:
               - match:
-                  prefix: /stats/prometheus
+                  path: /stats/prometheus
+                  headers:
+                  - name: ":method"
+                    exact_match: GET
                 route:
                   cluster: prometheus_stats
+                {{- if .EnablePrometheusCompression }}
+                typed_per_filter_config:
+                  envoy.filters.http.compression:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.compressor.v3.CompressorPerRoute
+                    {{- if eq .PrometheusCompressionLibrary "gzip"}}
+                    compressor_library:
+                      name: text_optimized
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.compression.gzip.compressor.v3.Gzip
+                    {{- end }}
+                    {{- if eq .PrometheusCompressionLibrary "brotli"}}
+                    compressor_library:
+                      name: text_optimized
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.compression.brotli.compressor.v3.Brotli
+                    {{- end }}
+                    {{- if eq .PrometheusCompressionLibrary "zstd"}}
+                    compressor_library:
+                      name: text_optimized
+                      typed_config:
+                        "@type": type.googleapis.com/envoy.extensions.compression.zstd.compressor.v3.Zstd
+                    {{- end }}
+                {{- end }}
             {{- end }}
           http_filters:
           - name: envoy.filters.http.health_check
@@ -168,11 +198,73 @@ static_resources:
           - name: xds_certificate
             sds_config:
               path_config_source:
-                path: "/sds/xds-certificate.json"
+                path: {{ .SdsCertificatePath }}
               resource_api_version: V3
           validation_context_sds_secret_config:
             name: xds_trusted_ca
             sds_config:
               path_config_source:
-                path: "/sds/xds-trusted-ca.json"
+                path: {{ .SdsTrustedCAPath }}
               resource_api_version: V3
+  - name: wasm_cluster
+    type: STRICT_DNS
+    connect_timeout: 10s
+    load_assignment:
+      cluster_name: wasm_cluster
+      endpoints:
+      - load_balancing_weight: 1
+        lb_endpoints:
+        - load_balancing_weight: 1
+          endpoint:
+            address:
+              socket_address:
+                address: {{ .WasmServer.Address }}
+                port_value: {{ .WasmServer.Port }}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions"
+        explicit_http_config:
+          http2_protocol_options: {}
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          tls_params:
+            tls_maximum_protocol_version: TLSv1_3
+          tls_certificate_sds_secret_configs:
+          - name: xds_certificate
+            sds_config:
+              path_config_source:
+                path: {{ .SdsCertificatePath }}
+              resource_api_version: V3
+          validation_context_sds_secret_config:
+            name: xds_trusted_ca
+            sds_config:
+              path_config_source:
+                path: {{ .SdsTrustedCAPath }}
+              resource_api_version: V3
+overload_manager:
+  refresh_interval: 0.25s
+  resource_monitors:
+  - name: "envoy.resource_monitors.global_downstream_max_connections"
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+      max_active_downstream_connections: 50000
+  {{- with .OverloadManager.MaxHeapSizeBytes }}
+  - name: "envoy.resource_monitors.fixed_heap"
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+      max_heap_size_bytes: {{ . }}
+  actions:
+  - name: "envoy.overload_actions.shrink_heap"
+    triggers:
+    - name: "envoy.resource_monitors.fixed_heap"
+      threshold:
+        value: 0.95
+  - name: "envoy.overload_actions.stop_accepting_requests"
+    triggers:
+    - name: "envoy.resource_monitors.fixed_heap"
+      threshold:
+        value: 0.98
+  {{- end }}

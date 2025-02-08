@@ -33,6 +33,13 @@ xds:
             envoy.restart_features.use_eds_cache_for_ads: true
             re2.max_program_size.error_level: 4294967295
             re2.max_program_size.warn_level: 1000
+      overloadManager:
+        refreshInterval: 0.250s
+        resourceMonitors:
+        - name: envoy.resource_monitors.global_downstream_max_connections
+          typedConfig:
+            '@type': type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+            maxActiveDownstreamConnections: "50000"
       staticResources:
         clusters:
         - connectTimeout: 0.250s
@@ -88,6 +95,44 @@ xds:
                   connectionKeepalive:
                     interval: 30s
                     timeout: 5s
+        - connectTimeout: 10s
+          loadAssignment:
+            clusterName: wasm_cluster
+            endpoints:
+            - lbEndpoints:
+              - endpoint:
+                  address:
+                    socketAddress:
+                      address: envoy-gateway
+                      portValue: 18002
+                loadBalancingWeight: 1
+              loadBalancingWeight: 1
+          name: wasm_cluster
+          transportSocket:
+            name: envoy.transport_sockets.tls
+            typedConfig:
+              '@type': type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              commonTlsContext:
+                tlsCertificateSdsSecretConfigs:
+                - name: xds_certificate
+                  sdsConfig:
+                    pathConfigSource:
+                      path: /sds/xds-certificate.json
+                    resourceApiVersion: V3
+                tlsParams:
+                  tlsMaximumProtocolVersion: TLSv1_3
+                validationContextSdsSecretConfig:
+                  name: xds_trusted_ca
+                  sdsConfig:
+                    pathConfigSource:
+                      path: /sds/xds-trusted-ca.json
+                    resourceApiVersion: V3
+          type: STRICT_DNS
+          typedExtensionProtocolOptions:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              '@type': type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicitHttpConfig:
+                http2ProtocolOptions: {}
         listeners:
         - address:
             socketAddress:
@@ -110,6 +155,7 @@ xds:
                 - name: envoy.filters.http.router
                   typedConfig:
                     '@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                normalizePath: true
                 routeConfig:
                   name: local_route
                   virtualHosts:
@@ -118,7 +164,10 @@ xds:
                     name: prometheus_stats
                     routes:
                     - match:
-                        prefix: /stats/prometheus
+                        headers:
+                        - exactMatch: GET
+                          name: :method
+                        path: /stats/prometheus
                       route:
                         cluster: prometheus_stats
                 statPrefix: eg-ready-http

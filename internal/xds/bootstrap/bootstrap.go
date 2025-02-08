@@ -9,12 +9,15 @@ import (
 	// Register embed
 	_ "embed"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"text/template"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
+	netutils "github.com/envoyproxy/gateway/internal/utils/net"
 	"github.com/envoyproxy/gateway/internal/utils/regex"
 )
 
@@ -24,19 +27,29 @@ const (
 	// envoyGatewayXdsServerHost is the DNS name of the Xds Server within Envoy Gateway.
 	// It defaults to the Envoy Gateway Kubernetes service.
 	envoyGatewayXdsServerHost = "envoy-gateway"
-	// envoyAdminAddress is the listening address of the envoy admin interface.
-	envoyAdminAddress = "127.0.0.1"
-	// envoyAdminPort is the port used to expose admin interface.
-	envoyAdminPort = 19000
+	// EnvoyAdminAddress is the listening v4 address of the envoy admin interface.
+	EnvoyAdminAddress   = "127.0.0.1"
+	EnvoyAdminAddressV6 = "::1"
+	// EnvoyAdminPort is the port used to expose admin interface.
+	EnvoyAdminPort = 19000
 	// envoyAdminAccessLogPath is the path used to expose admin access log.
 	envoyAdminAccessLogPath = "/dev/null"
 
 	// DefaultXdsServerPort is the default listening port of the xds-server.
 	DefaultXdsServerPort = 18000
 
-	envoyReadinessAddress = "0.0.0.0"
-	EnvoyReadinessPort    = 19001
-	EnvoyReadinessPath    = "/ready"
+	wasmServerHost = envoyGatewayXdsServerHost
+	// DefaultWasmServerPort is the default listening port of the wasm HTTP server.
+	wasmServerPort = 18002
+
+	envoyReadinessAddressv4 = "0.0.0.0"
+	envoyReadinessAddressv6 = "::"
+
+	EnvoyReadinessPort = 19001
+	EnvoyReadinessPath = "/ready"
+
+	defaultSdsTrustedCAPath   = "/sds/xds-trusted-ca.json"
+	defaultSdsCertificatePath = "/sds/xds-certificate.json"
 )
 
 //go:embed bootstrap.yaml.tpl
@@ -44,7 +57,7 @@ var bootstrapTmplStr string
 
 var bootstrapTmpl = template.Must(template.New(envoyCfgFileName).Parse(bootstrapTmplStr))
 
-// envoyBootstrap defines the envoy Bootstrap configuration.
+// bootstrapConfig defines the envoy Bootstrap configuration.
 type bootstrapConfig struct {
 	// parameters defines configurable bootstrap configuration parameters.
 	parameters bootstrapParameters
@@ -52,26 +65,44 @@ type bootstrapConfig struct {
 	rendered string
 }
 
-// envoyBootstrap defines the envoy Bootstrap configuration.
+// bootstrapParameters defines the envoy Bootstrap configuration.
 type bootstrapParameters struct {
 	// XdsServer defines the configuration of the XDS server.
-	XdsServer xdsServerParameters
+	XdsServer serverParameters
+	// WasmServer defines the configuration of the Wasm HTTP server.
+	WasmServer serverParameters
 	// AdminServer defines the configuration of the Envoy admin interface.
 	AdminServer adminServerParameters
 	// ReadyServer defines the configuration for health check ready listener
 	ReadyServer readyServerParameters
+
+	// SdsCertificatePath defines the path to SDS certificate config.
+	SdsCertificatePath string
+	// SdsTrustedCAPath defines the path to SDS trusted CA config.
+	SdsTrustedCAPath string
+
 	// EnablePrometheus defines whether to enable metrics endpoint for prometheus.
 	EnablePrometheus bool
+	// EnablePrometheusCompression defines whether to enable HTTP compression on metrics endpoint for prometheus.
+	EnablePrometheusCompression bool
+	// PrometheusCompressionLibrary defines the HTTP compression library for metrics endpoint for prometheus.
+	PrometheusCompressionLibrary string
+
 	// OtelMetricSinks defines the configuration of the OpenTelemetry sinks.
 	OtelMetricSinks []metricSink
-	// EnableStatConfig defines whether to to customize the Envoy proxy stats.
+	// EnableStatConfig defines whether to customize the Envoy proxy stats.
 	EnableStatConfig bool
 	// StatsMatcher is to control creation of custom Envoy stats with prefix,
 	// suffix, and regex expressions match on the name of the stats.
 	StatsMatcher *StatsMatcherParameters
+	// OverloadManager defines the configuration of the Envoy overload manager.
+	OverloadManager overloadManagerParameters
+
+	// IPFamily of the Listener
+	IPFamily string
 }
 
-type xdsServerParameters struct {
+type serverParameters struct {
 	// Address is the address of the XDS Server that Envoy is managed by.
 	Address string
 	// Port is the port of the XDS Server that Envoy is managed by.
@@ -82,7 +113,7 @@ type metricSink struct {
 	// Address is the address of the XDS Server that Envoy is managed by.
 	Address string
 	// Port is the port of the XDS Server that Envoy is managed by.
-	Port int32
+	Port uint32
 }
 
 type adminServerParameters struct {
@@ -105,9 +136,30 @@ type readyServerParameters struct {
 
 type StatsMatcherParameters struct {
 	Exacts             []string
-	Prefixs            []string
-	Suffixs            []string
+	Prefixes           []string
+	Suffixes           []string
 	RegularExpressions []string
+}
+
+type overloadManagerParameters struct {
+	MaxHeapSizeBytes uint64
+}
+
+type RenderBootstrapConfigOptions struct {
+	IPFamily         *egv1a1.IPFamily
+	ProxyMetrics     *egv1a1.ProxyMetrics
+	SdsConfig        SdsConfigPath
+	XdsServerHost    *string
+	XdsServerPort    *int32
+	WasmServerPort   *int32
+	AdminServerPort  *int32
+	ReadyServerPort  *int32
+	MaxHeapSizeBytes uint64
+}
+
+type SdsConfigPath struct {
+	Certificate string
+	TrustedCA   string
 }
 
 // render the stringified bootstrap config in yaml format.
@@ -122,16 +174,25 @@ func (b *bootstrapConfig) render() error {
 }
 
 // GetRenderedBootstrapConfig renders the bootstrap YAML string
-func GetRenderedBootstrapConfig(proxyMetrics *egv1a1.ProxyMetrics) (string, error) {
+func GetRenderedBootstrapConfig(opts *RenderBootstrapConfigOptions) (string, error) {
 	var (
-		enablePrometheus = true
-		metricSinks      []metricSink
-		StatsMatcher     StatsMatcherParameters
+		enablePrometheus             = true
+		enablePrometheusCompression  = false
+		PrometheusCompressionLibrary = "gzip"
+		metricSinks                  []metricSink
+		StatsMatcher                 StatsMatcherParameters
 	)
 
-	if proxyMetrics != nil {
+	if opts != nil && opts.ProxyMetrics != nil {
+		proxyMetrics := opts.ProxyMetrics
+
 		if proxyMetrics.Prometheus != nil {
 			enablePrometheus = !proxyMetrics.Prometheus.Disable
+
+			if proxyMetrics.Prometheus.Compression != nil {
+				enablePrometheusCompression = true
+				PrometheusCompressionLibrary = string(proxyMetrics.Prometheus.Compression.Type)
+			}
 		}
 
 		addresses := sets.NewString()
@@ -141,15 +202,23 @@ func GetRenderedBootstrapConfig(proxyMetrics *egv1a1.ProxyMetrics) (string, erro
 			}
 
 			// skip duplicate sinks
-			addr := fmt.Sprintf("%s:%d", sink.OpenTelemetry.Host, sink.OpenTelemetry.Port)
+			var host string
+			var port uint32
+			if sink.OpenTelemetry.Host != nil {
+				host, port = *sink.OpenTelemetry.Host, uint32(sink.OpenTelemetry.Port)
+			}
+			if len(sink.OpenTelemetry.BackendRefs) > 0 {
+				host, port = netutils.BackendHostAndPort(sink.OpenTelemetry.BackendRefs[0].BackendObjectReference, "")
+			}
+			addr := net.JoinHostPort(host, strconv.Itoa(int(port)))
 			if addresses.Has(addr) {
 				continue
 			}
 			addresses.Insert(addr)
 
 			metricSinks = append(metricSinks, metricSink{
-				Address: sink.OpenTelemetry.Host,
-				Port:    sink.OpenTelemetry.Port,
+				Address: host,
+				Port:    port,
 			})
 		}
 
@@ -165,9 +234,9 @@ func GetRenderedBootstrapConfig(proxyMetrics *egv1a1.ProxyMetrics) (string, erro
 				case egv1a1.StringMatchExact:
 					StatsMatcher.Exacts = append(StatsMatcher.Exacts, match.Value)
 				case egv1a1.StringMatchPrefix:
-					StatsMatcher.Prefixs = append(StatsMatcher.Prefixs, match.Value)
+					StatsMatcher.Prefixes = append(StatsMatcher.Prefixes, match.Value)
 				case egv1a1.StringMatchSuffix:
-					StatsMatcher.Suffixs = append(StatsMatcher.Suffixs, match.Value)
+					StatsMatcher.Suffixes = append(StatsMatcher.Suffixes, match.Value)
 				case egv1a1.StringMatchRegularExpression:
 					if err := regex.Validate(match.Value); err != nil {
 						return "", err
@@ -180,26 +249,76 @@ func GetRenderedBootstrapConfig(proxyMetrics *egv1a1.ProxyMetrics) (string, erro
 
 	cfg := &bootstrapConfig{
 		parameters: bootstrapParameters{
-			XdsServer: xdsServerParameters{
+			XdsServer: serverParameters{
 				Address: envoyGatewayXdsServerHost,
 				Port:    DefaultXdsServerPort,
 			},
+			WasmServer: serverParameters{
+				Address: wasmServerHost,
+				Port:    wasmServerPort,
+			},
 			AdminServer: adminServerParameters{
-				Address:       envoyAdminAddress,
-				Port:          envoyAdminPort,
+				Address:       EnvoyAdminAddress,
+				Port:          EnvoyAdminPort,
 				AccessLogPath: envoyAdminAccessLogPath,
 			},
 			ReadyServer: readyServerParameters{
-				Address:       envoyReadinessAddress,
+				Address:       envoyReadinessAddressv4,
 				Port:          EnvoyReadinessPort,
 				ReadinessPath: EnvoyReadinessPath,
 			},
-			EnablePrometheus: enablePrometheus,
-			OtelMetricSinks:  metricSinks,
+			SdsCertificatePath:           defaultSdsCertificatePath,
+			SdsTrustedCAPath:             defaultSdsTrustedCAPath,
+			EnablePrometheus:             enablePrometheus,
+			EnablePrometheusCompression:  enablePrometheusCompression,
+			PrometheusCompressionLibrary: PrometheusCompressionLibrary,
+			OtelMetricSinks:              metricSinks,
 		},
 	}
-	if proxyMetrics != nil && proxyMetrics.Matches != nil {
-		cfg.parameters.StatsMatcher = &StatsMatcher
+
+	// Bootstrap config override
+	if opts != nil {
+		if opts.ProxyMetrics != nil && opts.ProxyMetrics.Matches != nil {
+			cfg.parameters.StatsMatcher = &StatsMatcher
+		}
+
+		// Override Sds configs
+		if len(opts.SdsConfig.Certificate) > 0 {
+			cfg.parameters.SdsCertificatePath = opts.SdsConfig.Certificate
+		}
+		if len(opts.SdsConfig.TrustedCA) > 0 {
+			cfg.parameters.SdsTrustedCAPath = opts.SdsConfig.TrustedCA
+		}
+
+		if opts.XdsServerHost != nil {
+			cfg.parameters.XdsServer.Address = *opts.XdsServerHost
+		}
+
+		// Override the various server port
+		if opts.XdsServerPort != nil {
+			cfg.parameters.XdsServer.Port = *opts.XdsServerPort
+		}
+		if opts.AdminServerPort != nil {
+			cfg.parameters.AdminServer.Port = *opts.AdminServerPort
+		}
+		if opts.ReadyServerPort != nil {
+			cfg.parameters.ReadyServer.Port = *opts.ReadyServerPort
+		}
+		if opts.WasmServerPort != nil {
+			cfg.parameters.WasmServer.Port = *opts.WasmServerPort
+		}
+
+		if opts.IPFamily != nil {
+			cfg.parameters.IPFamily = string(*opts.IPFamily)
+			if *opts.IPFamily == egv1a1.IPv6 {
+				cfg.parameters.AdminServer.Address = EnvoyAdminAddressV6
+				cfg.parameters.ReadyServer.Address = envoyReadinessAddressv6
+			} else if *opts.IPFamily == egv1a1.DualStack {
+				cfg.parameters.ReadyServer.Address = envoyReadinessAddressv6
+			}
+		}
+
+		cfg.parameters.OverloadManager.MaxHeapSizeBytes = opts.MaxHeapSizeBytes
 	}
 
 	if err := cfg.render(); err != nil {

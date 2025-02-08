@@ -45,7 +45,7 @@ infraIR:
         name: envoy-gateway/gateway-1/tcp
         ports:
         - containerPort: 10162
-          name: tcp
+          name: tcp-162
           protocol: TCP
           servicePort: 162
       metadata:
@@ -72,13 +72,14 @@ tcpRoutes:
     parents:
     - conditions:
       - lastTransitionTime: null
-        message: Route is accepted
-        reason: Accepted
-        status: "True"
+        message: 'backend service validation failed: TCP Port 8081 not found on service
+          default/service-1'
+        reason: Failed to process the settings associated with the TCP route.
+        status: "False"
         type: Accepted
       - lastTransitionTime: null
         message: TCP Port 8081 not found on service default/service-1
-        reason: PortNotFound
+        reason: BackendNotFound
         status: "False"
         type: ResolvedRefs
       controllerName: gateway.envoyproxy.io/gatewayclass-controller
@@ -90,3 +91,7 @@ xdsIR:
     accessLog:
       text:
       - path: /dev/stdout
+    tcp:
+    - address: 0.0.0.0
+      name: envoy-gateway/gateway-1/tcp
+      port: 10162

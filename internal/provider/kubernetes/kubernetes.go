@@ -8,18 +8,23 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/envoygateway"
-	"github.com/envoyproxy/gateway/internal/envoygateway/config"
+	ec "github.com/envoyproxy/gateway/internal/envoygateway/config"
 	"github.com/envoyproxy/gateway/internal/message"
-	"github.com/envoyproxy/gateway/internal/status"
 )
 
 // Provider is the scaffolding for the Kubernetes provider. It sets up dependencies
@@ -31,35 +36,66 @@ type Provider struct {
 }
 
 // New creates a new Provider from the provided EnvoyGateway.
-func New(cfg *rest.Config, svr *config.Server, resources *message.ProviderResources) (*Provider, error) {
+func New(ctx context.Context, restCfg *rest.Config, svrCfg *ec.Server, resources *message.ProviderResources) (*Provider, error) {
 	// TODO: Decide which mgr opts should be exposed through envoygateway.provider.kubernetes API.
+
 	mgrOpts := manager.Options{
-		Scheme:                 envoygateway.GetScheme(),
-		Logger:                 svr.Logger.Logger,
-		LeaderElection:         false,
-		HealthProbeBindAddress: ":8081",
-		LeaderElectionID:       "5b9825d2.gateway.envoyproxy.io",
+		Scheme:                  envoygateway.GetScheme(),
+		Logger:                  svrCfg.Logger.Logger,
+		HealthProbeBindAddress:  ":8081",
+		LeaderElectionID:        "5b9825d2.gateway.envoyproxy.io",
+		LeaderElectionNamespace: svrCfg.Namespace,
 	}
 
-	if svr.EnvoyGateway.NamespaceMode() {
+	log.SetLogger(mgrOpts.Logger)
+	klog.SetLogger(mgrOpts.Logger)
+
+	if !ptr.Deref(svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.Disable, false) {
+		mgrOpts.LeaderElection = true
+		if svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.LeaseDuration != nil {
+			ld, err := time.ParseDuration(string(*svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.LeaseDuration))
+			if err != nil {
+				return nil, err
+			}
+			mgrOpts.LeaseDuration = ptr.To(ld)
+		}
+
+		if svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.RetryPeriod != nil {
+			rp, err := time.ParseDuration(string(*svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.RetryPeriod))
+			if err != nil {
+				return nil, err
+			}
+			mgrOpts.RetryPeriod = ptr.To(rp)
+		}
+
+		if svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.RenewDeadline != nil {
+			rd, err := time.ParseDuration(string(*svrCfg.EnvoyGateway.Provider.Kubernetes.LeaderElection.RenewDeadline))
+			if err != nil {
+				return nil, err
+			}
+			mgrOpts.RenewDeadline = ptr.To(rd)
+		}
+		mgrOpts.Controller = config.Controller{NeedLeaderElection: ptr.To(false)}
+	}
+
+	if svrCfg.EnvoyGateway.NamespaceMode() {
 		mgrOpts.Cache.DefaultNamespaces = make(map[string]cache.Config)
-		for _, watchNS := range svr.EnvoyGateway.Provider.Kubernetes.Watch.Namespaces {
+		for _, watchNS := range svrCfg.EnvoyGateway.Provider.Kubernetes.Watch.Namespaces {
 			mgrOpts.Cache.DefaultNamespaces[watchNS] = cache.Config{}
 		}
 	}
-
-	mgr, err := ctrl.NewManager(cfg, mgrOpts)
+	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}
 
-	updateHandler := status.NewUpdateHandler(mgr.GetLogger(), mgr.GetClient())
+	updateHandler := NewUpdateHandler(mgr.GetLogger(), mgr.GetClient())
 	if err := mgr.Add(updateHandler); err != nil {
 		return nil, fmt.Errorf("failed to add status update handler %w", err)
 	}
 
 	// Create and register the controllers with the manager.
-	if err := newGatewayAPIController(mgr, svr, updateHandler.Writer(), resources); err != nil {
+	if err := newGatewayAPIController(ctx, mgr, svrCfg, updateHandler.Writer(), resources); err != nil {
 		return nil, fmt.Errorf("failted to create gatewayapi controller: %w", err)
 	}
 
@@ -73,10 +109,22 @@ func New(cfg *rest.Config, svr *config.Server, resources *message.ProviderResour
 		return nil, fmt.Errorf("unable to set up ready check: %w", err)
 	}
 
+	// Emit elected & continue with the tasks that require leadership.
+	go func() {
+		<-mgr.Elected()
+		// Close the elected channel to signal that this EG instance has been elected as leader.
+		// This allows the tasks that require leadership to proceed.
+		close(svrCfg.Elected)
+	}()
+
 	return &Provider{
 		manager: mgr,
 		client:  mgr.GetClient(),
 	}, nil
+}
+
+func (p *Provider) Type() egv1a1.ProviderType {
+	return egv1a1.ProviderTypeKubernetes
 }
 
 // Start starts the Provider synchronously until a message is received from ctx.

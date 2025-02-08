@@ -17,12 +17,20 @@ type HealthCheck struct {
 	// Passive passive check configuration
 	// +optional
 	Passive *PassiveHealthCheck `json:"passive,omitempty"`
+
+	// When number of unhealthy endpoints for a backend reaches this threshold
+	// Envoy will disregard health status and balance across all endpoints.
+	// It's designed to prevent a situation in which host failures cascade throughout the cluster
+	// as load increases. If not set, the default value is 50%. To disable panic mode, set value to `0`.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	PanicThreshold *uint32 `json:"panicThreshold,omitempty"`
 }
 
 // PassiveHealthCheck defines the configuration for passive health checks in the context of Envoy's Outlier Detection,
 // see https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/outlier
 type PassiveHealthCheck struct {
-
 	// SplitExternalLocalOriginErrors enables splitting of errors between external and local origin.
 	//
 	// +kubebuilder:default=false
@@ -75,6 +83,7 @@ type PassiveHealthCheck struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.type == 'HTTP' ? has(self.http) : !has(self.http)",message="If Health Checker type is HTTP, http field needs to be set."
 // +kubebuilder:validation:XValidation:rule="self.type == 'TCP' ? has(self.tcp) : !has(self.tcp)",message="If Health Checker type is TCP, tcp field needs to be set."
+// +kubebuilder:validation:XValidation:rule="has(self.grpc) ? self.type == 'GRPC' : true", message="The grpc field can only be set if the Health Checker type is GRPC."
 type ActiveHealthCheck struct {
 	// Timeout defines the time to wait for a health check response.
 	//
@@ -105,7 +114,7 @@ type ActiveHealthCheck struct {
 	HealthyThreshold *uint32 `json:"healthyThreshold"`
 
 	// Type defines the type of health checker.
-	// +kubebuilder:validation:Enum=HTTP;TCP
+	// +kubebuilder:validation:Enum=HTTP;TCP;GRPC
 	// +unionDiscriminator
 	Type ActiveHealthCheckerType `json:"type" yaml:"type"`
 
@@ -118,10 +127,15 @@ type ActiveHealthCheck struct {
 	// It's required while the health checker type is TCP.
 	// +optional
 	TCP *TCPActiveHealthChecker `json:"tcp,omitempty" yaml:"tcp,omitempty"`
+
+	// GRPC defines the configuration of the GRPC health checker.
+	// It's optional, and can only be used if the specified type is GRPC.
+	// +optional
+	GRPC *GRPCActiveHealthChecker `json:"grpc,omitempty" yaml:"grpc,omitempty"`
 }
 
 // ActiveHealthCheckerType is the type of health checker.
-// +kubebuilder:validation:Enum=HTTP;TCP
+// +kubebuilder:validation:Enum=HTTP;TCP;GRPC
 type ActiveHealthCheckerType string
 
 const (
@@ -129,6 +143,8 @@ const (
 	ActiveHealthCheckerTypeHTTP ActiveHealthCheckerType = "HTTP"
 	// ActiveHealthCheckerTypeTCP defines the TCP type of health checking.
 	ActiveHealthCheckerTypeTCP ActiveHealthCheckerType = "TCP"
+	// ActiveHealthCheckerTypeGRPC defines the GRPC type of health checking.
+	ActiveHealthCheckerTypeGRPC ActiveHealthCheckerType = "GRPC"
 )
 
 // HTTPActiveHealthChecker defines the settings of http health check.
@@ -158,6 +174,15 @@ type TCPActiveHealthChecker struct {
 	// Receive defines the expected response payload.
 	// +optional
 	Receive *ActiveHealthCheckPayload `json:"receive,omitempty" yaml:"receive,omitempty"`
+}
+
+// GRPCActiveHealthChecker defines the settings of the GRPC health check.
+type GRPCActiveHealthChecker struct {
+	// Service to send in the health check request.
+	// If this is not specified, then the health check request applies to the entire
+	// server and not to a specific service.
+	// +optional
+	Service *string `json:"service,omitempty" yaml:"service,omitempty"`
 }
 
 // ActiveHealthCheckPayloadType is the type of the payload.

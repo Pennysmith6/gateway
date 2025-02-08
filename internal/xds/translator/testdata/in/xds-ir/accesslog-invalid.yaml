@@ -19,11 +19,15 @@ accesslog:
       "response_code": "%RESPONSE_CODE%"
     resources:
       "cluster_name": "cluster1"
-    host: ""
-    port: 4317
+    destination:
+      name: "accesslog-0"
+      settings:
+      - endpoints:
+        - host: ""
+          port: 4317
 http:
 - name: "first-listener"
-  address: "0.0.0.0"
+  address: "::"
   port: 10080
   hostnames:
   - "*"

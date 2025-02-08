@@ -56,6 +56,18 @@
                 }
               ]
             },
+            "overloadManager": {
+              "refreshInterval": "0.250s",
+              "resourceMonitors": [
+                {
+                  "name": "envoy.resource_monitors.global_downstream_max_connections",
+                  "typedConfig": {
+                    "@type": "type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig",
+                    "maxActiveDownstreamConnections": "50000"
+                  }
+                }
+              ]
+            },
             "staticResources": {
               "clusters": [
                 {
@@ -151,6 +163,71 @@
                       }
                     }
                   }
+                },
+                {
+                  "connectTimeout": "10s",
+                  "loadAssignment": {
+                    "clusterName": "wasm_cluster",
+                    "endpoints": [
+                      {
+                        "lbEndpoints": [
+                          {
+                            "endpoint": {
+                              "address": {
+                                "socketAddress": {
+                                  "address": "envoy-gateway",
+                                  "portValue": 18002
+                                }
+                              }
+                            },
+                            "loadBalancingWeight": 1
+                          }
+                        ],
+                        "loadBalancingWeight": 1
+                      }
+                    ]
+                  },
+                  "name": "wasm_cluster",
+                  "transportSocket": {
+                    "name": "envoy.transport_sockets.tls",
+                    "typedConfig": {
+                      "@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
+                      "commonTlsContext": {
+                        "tlsCertificateSdsSecretConfigs": [
+                          {
+                            "name": "xds_certificate",
+                            "sdsConfig": {
+                              "pathConfigSource": {
+                                "path": "/sds/xds-certificate.json"
+                              },
+                              "resourceApiVersion": "V3"
+                            }
+                          }
+                        ],
+                        "tlsParams": {
+                          "tlsMaximumProtocolVersion": "TLSv1_3"
+                        },
+                        "validationContextSdsSecretConfig": {
+                          "name": "xds_trusted_ca",
+                          "sdsConfig": {
+                            "pathConfigSource": {
+                              "path": "/sds/xds-trusted-ca.json"
+                            },
+                            "resourceApiVersion": "V3"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "type": "STRICT_DNS",
+                  "typedExtensionProtocolOptions": {
+                    "envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
+                      "@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
+                      "explicitHttpConfig": {
+                        "http2ProtocolOptions": {}
+                      }
+                    }
+                  }
                 }
               ],
               "listeners": [
@@ -191,6 +268,7 @@
                                 }
                               }
                             ],
+                            "normalizePath": true,
                             "routeConfig": {
                               "name": "local_route",
                               "virtualHosts": [
@@ -202,7 +280,13 @@
                                   "routes": [
                                     {
                                       "match": {
-                                        "prefix": "/stats/prometheus"
+                                        "headers": [
+                                          {
+                                            "exactMatch": "GET",
+                                            "name": ":method"
+                                          }
+                                        ],
+                                        "path": "/stats/prometheus"
                                       },
                                       "route": {
                                         "cluster": "prometheus_stats"
@@ -262,11 +346,18 @@
             {
               "cluster": {
                 "@type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+                "circuitBreakers": {
+                  "thresholds": [
+                    {
+                      "maxRetries": 1024
+                    }
+                  ]
+                },
                 "commonLbConfig": {
                   "localityWeightedLbConfig": {}
                 },
                 "connectTimeout": "10s",
-                "dnsLookupFamily": "V4_ONLY",
+                "dnsLookupFamily": "V4_PREFERRED",
                 "edsClusterConfig": {
                   "edsConfig": {
                     "ads": {},
@@ -274,9 +365,9 @@
                   },
                   "serviceName": "httproute/envoy-gateway-system/backend/rule/0"
                 },
+                "ignoreHealthOnHostRemoval": true,
                 "lbPolicy": "LEAST_REQUEST",
                 "name": "httproute/envoy-gateway-system/backend/rule/0",
-                "outlierDetection": {},
                 "perConnectionBufferLimitBytes": 32768,
                 "type": "EDS"
               }
@@ -284,11 +375,18 @@
             {
               "cluster": {
                 "@type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+                "circuitBreakers": {
+                  "thresholds": [
+                    {
+                      "maxRetries": 1024
+                    }
+                  ]
+                },
                 "commonLbConfig": {
                   "localityWeightedLbConfig": {}
                 },
                 "connectTimeout": "10s",
-                "dnsLookupFamily": "V4_ONLY",
+                "dnsLookupFamily": "V4_PREFERRED",
                 "dnsRefreshRate": "30s",
                 "lbPolicy": "LEAST_REQUEST",
                 "loadAssignment": {
@@ -316,7 +414,6 @@
                   ]
                 },
                 "name": "raw_githubusercontent_com_443",
-                "outlierDetection": {},
                 "perConnectionBufferLimitBytes": 32768,
                 "respectDnsTtl": true,
                 "transportSocket": {
@@ -408,6 +505,12 @@
                                 "providers": {
                                   "httproute/envoy-gateway-system/backend/rule/0/match/0/www_example_com/example": {
                                     "forward": true,
+                                    "normalizePayloadInMetadata": {
+                                      "spaceDelimitedClaims": [
+                                        "scope"
+                                      ]
+                                    },
+                                    "payloadInMetadata": "example",
                                     "remoteJwks": {
                                       "asyncFetch": {},
                                       "cacheDuration": "300s",
@@ -415,8 +518,7 @@
                                         "cluster": "raw_githubusercontent_com_443",
                                         "timeout": "10s",
                                         "uri": "https://raw.githubusercontent.com/envoyproxy/gateway/main/examples/kubernetes/jwt/jwks.json"
-                                      },
-                                      "retryPolicy": {}
+                                      }
                                     }
                                   }
                                 },
@@ -446,11 +548,12 @@
                             "routeConfigName": "envoy-gateway-system/eg/http"
                           },
                           "serverHeaderTransformation": "PASS_THROUGH",
-                          "statPrefix": "http",
+                          "statPrefix": "http-10080",
                           "useRemoteAddress": true
                         }
                       }
-                    ]
+                    ],
+                    "name": "envoy-gateway-system/eg/http"
                   },
                   "name": "envoy-gateway-system/eg/http",
                   "perConnectionBufferLimitBytes": 32768
@@ -472,11 +575,38 @@
                     "domains": [
                       "www.example.com"
                     ],
+                    "metadata": {
+                      "filterMetadata": {
+                        "envoy-gateway": {
+                          "resources": [
+                            {
+                              "kind": "Gateway",
+                              "name": "eg",
+                              "namespace": "envoy-gateway-system",
+                              "sectionName": "http"
+                            }
+                          ]
+                        }
+                      }
+                    },
                     "name": "envoy-gateway-system/eg/http/www_example_com",
                     "routes": [
                       {
                         "match": {
                           "pathSeparatedPrefix": "/foo"
+                        },
+                        "metadata": {
+                          "filterMetadata": {
+                            "envoy-gateway": {
+                              "resources": [
+                                {
+                                  "kind": "HTTPRoute",
+                                  "name": "backend",
+                                  "namespace": "envoy-gateway-system"
+                                }
+                              ]
+                            }
+                          }
                         },
                         "name": "httproute/envoy-gateway-system/backend/rule/0/match/0/www_example_com",
                         "route": {

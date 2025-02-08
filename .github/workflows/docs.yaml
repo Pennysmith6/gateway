@@ -3,15 +3,15 @@ on:
   push:
     branches:
     - "main"
-    - "release/v*"
     paths:
     - 'site/**'
+    - 'tools/make/docs.mk'
   pull_request:
     branches:
     - "main"
-    - "release/v*"
     paths:
     - 'site/**'
+    - 'tools/make/docs.mk'
 
 permissions:
   contents: read
@@ -21,15 +21,23 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     - name: Check out code
-      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         ref: ${{ github.event.pull_request.head.sha }}
 
+    - uses: ./tools/github-actions/setup-deps
+
     - name: Run markdown linter
-      uses: nosborn/github-action-markdown-cli@9b5e871c11cc0649c5ac2526af22e23525fa344d  # v3.3.0
+      uses: nosborn/github-action-markdown-cli@58bcfd1af530d87a13d51b76e6713b52602e3613  # v3.4.0
       with:
         files: site/content/*
         config_file: ".github/markdown_lint_config.json"
+
+    - name: Install linkinator
+      run: npm install -g linkinator@6.0.4
+
+    - name: Check links
+      run: make docs docs-check-links
 
   docs-build:
     runs-on: ubuntu-latest
@@ -38,19 +46,21 @@ jobs:
       contents: write
     steps:
     - name: Git checkout
-      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       with:
         submodules: true
         ref: ${{ github.event.pull_request.head.sha }}
 
+    - uses: ./tools/github-actions/setup-deps
+
     - name: Setup Hugo
-      uses: peaceiris/actions-hugo@16361eb4acea8698b220b76c0d4e84e1fd22c61d  # v2.6.0
+      uses: peaceiris/actions-hugo@75d2e84710de30f6ff7268e08f310b60ef14033f  # v3.0.0
       with:
         hugo-version: 'latest'
         extended: true
 
     - name: Setup Node
-      uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8  # v4.1.0
+      uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a  # v4.2.0
       with:
         node-version: '18'
 
@@ -86,4 +96,4 @@ jobs:
     steps:
     - name: Deploy to GitHub Pages
       id: deployment
-      uses: actions/deploy-pages@decdde0ac072f6dcbe43649d82d9c635fff5b4e4  # v4.0.4
+      uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4.0.5

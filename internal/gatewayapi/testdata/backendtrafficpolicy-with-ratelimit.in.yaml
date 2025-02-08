@@ -73,7 +73,6 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: Gateway
       name: gateway-1
-      namespace: envoy-gateway
     rateLimit:
       type: Global
       global:
@@ -84,6 +83,9 @@ backendTrafficPolicies:
               value: one
             - name: x-org-id
               type: Distinct
+            - name: x-org-id
+              value: admin
+              invert: true
           limit:
             requests: 10
             unit: Hour
@@ -97,7 +99,6 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: HTTPRoute
       name: httproute-1
-      namespace: default
     rateLimit:
       type: Global
       global:
@@ -109,3 +110,12 @@ backendTrafficPolicies:
           limit:
             requests: 20
             unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 1
+            response:
+              from: Metadata
+              metadata:
+                namespace: something.com
+                key: some_cost_set_by_foo

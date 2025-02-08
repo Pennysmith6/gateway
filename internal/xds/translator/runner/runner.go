@@ -7,10 +7,11 @@ package runner
 
 import (
 	"context"
+	"reflect"
 
 	ktypes "k8s.io/apimachinery/pkg/types"
 
-	"github.com/envoyproxy/gateway/api/v1alpha1"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
 	extension "github.com/envoyproxy/gateway/internal/extension/types"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/ratelimit"
@@ -36,7 +37,7 @@ func New(cfg *Config) *Runner {
 }
 
 func (r *Runner) Name() string {
-	return string(v1alpha1.LogComponentXdsTranslatorRunner)
+	return string(egv1a1.LogComponentXdsTranslatorRunner)
 }
 
 // Start starts the xds-translator runner
@@ -49,7 +50,7 @@ func (r *Runner) Start(ctx context.Context) (err error) {
 
 func (r *Runner) subscribeAndTranslate(ctx context.Context) {
 	// Subscribe to resources
-	message.HandleSubscription(message.Metadata{Runner: string(v1alpha1.LogComponentXdsTranslatorRunner), Message: "xds-ir"}, r.XdsIR.Subscribe(ctx),
+	message.HandleSubscription(message.Metadata{Runner: string(egv1a1.LogComponentXdsTranslatorRunner), Message: "xds-ir"}, r.XdsIR.Subscribe(ctx),
 		func(update message.Update[string, *ir.Xds], errChan chan error) {
 			r.Logger.Info("received an update")
 			key := update.Key
@@ -59,7 +60,9 @@ func (r *Runner) subscribeAndTranslate(ctx context.Context) {
 				r.Xds.Delete(key)
 			} else {
 				// Translate to xds resources
-				t := &translator.Translator{}
+				t := &translator.Translator{
+					FilterOrder: val.FilterOrder,
+				}
 
 				// Set the extension manager if an extension is loaded
 				if r.ExtensionManager != nil {
@@ -90,19 +93,38 @@ func (r *Runner) subscribeAndTranslate(ctx context.Context) {
 					return
 				}
 
+				// Get all status keys from watchable and save them in the map statusesToDelete.
+				// Iterating through result.EnvoyPatchPolicyStatuses, any valid keys will be removed from statusesToDelete.
+				// Remaining keys will be deleted from watchable before we exit this function.
+				statusesToDelete := make(map[ktypes.NamespacedName]bool)
+				for key := range r.ProviderResources.EnvoyPatchPolicyStatuses.LoadAll() {
+					statusesToDelete[key] = true
+				}
+
 				// Publish EnvoyPatchPolicyStatus
 				for _, e := range result.EnvoyPatchPolicyStatuses {
 					key := ktypes.NamespacedName{
 						Name:      e.Name,
 						Namespace: e.Namespace,
 					}
-					r.ProviderResources.EnvoyPatchPolicyStatuses.Store(key, e.Status)
+					// Skip updating status for policies with empty status
+					// They may have been skipped in this translation because
+					// their target is not found (not relevant)
+					if !(reflect.ValueOf(e.Status).IsZero()) {
+						r.ProviderResources.EnvoyPatchPolicyStatuses.Store(key, e.Status)
+					}
+					delete(statusesToDelete, key)
 				}
 				// Discard the EnvoyPatchPolicyStatuses to reduce memory footprint
 				result.EnvoyPatchPolicyStatuses = nil
 
 				// Publish
 				r.Xds.Store(key, result)
+
+				// Delete all the deletable status keys
+				for key := range statusesToDelete {
+					r.ProviderResources.EnvoyPatchPolicyStatuses.Delete(key)
+				}
 			}
 		},
 	)

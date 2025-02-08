@@ -6,12 +6,17 @@
 package cmd
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/admin"
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
+	"github.com/envoyproxy/gateway/internal/envoygateway/config/loader"
 	extensionregistry "github.com/envoyproxy/gateway/internal/extension/registry"
+	"github.com/envoyproxy/gateway/internal/extension/types"
 	gatewayapirunner "github.com/envoyproxy/gateway/internal/gatewayapi/runner"
 	ratelimitrunner "github.com/envoyproxy/gateway/internal/globalratelimit/runner"
 	infrarunner "github.com/envoyproxy/gateway/internal/infrastructure/runner"
@@ -23,10 +28,8 @@ import (
 	xdstranslatorrunner "github.com/envoyproxy/gateway/internal/xds/translator/runner"
 )
 
-var (
-	// cfgPath is the path to the EnvoyGateway configuration file.
-	cfgPath string
-)
+// cfgPath is the path to the EnvoyGateway configuration file.
+var cfgPath string
 
 // getServerCommand returns the server cobra command to be executed.
 func getServerCommand() *cobra.Command {
@@ -51,6 +54,20 @@ func server() error {
 		return err
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+	hook := func(c context.Context, cfg *config.Server) error {
+		cfg.Logger.Info("Setup runners")
+		if err := setupRunners(c, cfg); err != nil {
+			cfg.Logger.Error(err, "failed to setup runners")
+			return err
+		}
+		return nil
+	}
+	l := loader.New(cfgPath, cfg, hook)
+	if err := l.Start(ctx); err != nil {
+		return err
+	}
+
 	// Init eg admin servers.
 	if err := admin.Init(cfg); err != nil {
 		return err
@@ -60,10 +77,10 @@ func server() error {
 		return err
 	}
 
-	// init eg runners.
-	if err := setupRunners(cfg); err != nil {
-		return err
-	}
+	// Wait exit signal
+	<-ctx.Done()
+
+	cfg.Logger.Info("shutting down")
 
 	return nil
 }
@@ -110,28 +127,31 @@ func getConfigByPath(cfgPath string) (*config.Server, error) {
 
 // setupRunners starts all the runners required for the Envoy Gateway to
 // fulfill its tasks.
-func setupRunners(cfg *config.Server) error {
-	// TODO - Setup a Config Manager
-	// https://github.com/envoyproxy/gateway/issues/43
-	ctx := ctrl.SetupSignalHandler()
+func setupRunners(ctx context.Context, cfg *config.Server) (err error) {
+	// The Elected channel is used to block the tasks that are waiting for the leader to be elected.
+	// It will be closed once the leader is elected in the controller manager.
+	cfg.Elected = make(chan struct{})
 
 	// Setup the Extension Manager
-	extMgr, err := extensionregistry.NewManager(cfg)
-	if err != nil {
-		return err
+	var extMgr types.Manager
+	if cfg.EnvoyGateway.Provider.Type == egv1a1.ProviderTypeKubernetes {
+		extMgr, err = extensionregistry.NewManager(cfg)
+		if err != nil {
+			return err
+		}
 	}
 
 	pResources := new(message.ProviderResources)
 	// Start the Provider Service
 	// It fetches the resources from the configured provider type
-	// and publishes it
+	// and publishes it.
 	// It also subscribes to status resources and once it receives
 	// a status resource back, it writes it out.
 	providerRunner := providerrunner.New(&providerrunner.Config{
 		Server:            *cfg,
 		ProviderResources: pResources,
 	})
-	if err := providerRunner.Start(ctx); err != nil {
+	if err = providerRunner.Start(ctx); err != nil {
 		return err
 	}
 
@@ -147,7 +167,7 @@ func setupRunners(cfg *config.Server) error {
 		InfraIR:           infraIR,
 		ExtensionManager:  extMgr,
 	})
-	if err := gwRunner.Start(ctx); err != nil {
+	if err = gwRunner.Start(ctx); err != nil {
 		return err
 	}
 
@@ -162,7 +182,7 @@ func setupRunners(cfg *config.Server) error {
 		ExtensionManager:  extMgr,
 		ProviderResources: pResources,
 	})
-	if err := xdsTranslatorRunner.Start(ctx); err != nil {
+	if err = xdsTranslatorRunner.Start(ctx); err != nil {
 		return err
 	}
 
@@ -173,7 +193,7 @@ func setupRunners(cfg *config.Server) error {
 		Server:  *cfg,
 		InfraIR: infraIR,
 	})
-	if err := infraRunner.Start(ctx); err != nil {
+	if err = infraRunner.Start(ctx); err != nil {
 		return err
 	}
 
@@ -184,7 +204,7 @@ func setupRunners(cfg *config.Server) error {
 		Server: *cfg,
 		Xds:    xds,
 	})
-	if err := xdsServerRunner.Start(ctx); err != nil {
+	if err = xdsServerRunner.Start(ctx); err != nil {
 		return err
 	}
 
@@ -196,7 +216,7 @@ func setupRunners(cfg *config.Server) error {
 			Server: *cfg,
 			XdsIR:  xdsIR,
 		})
-		if err := rateLimitRunner.Start(ctx); err != nil {
+		if err = rateLimitRunner.Start(ctx); err != nil {
 			return err
 		}
 	}
@@ -209,11 +229,13 @@ func setupRunners(cfg *config.Server) error {
 	infraIR.Close()
 	xds.Close()
 
-	cfg.Logger.Info("shutting down")
+	cfg.Logger.Info("runners are shutting down")
 
-	// Close connections to extension services
-	if mgr, ok := extMgr.(*extensionregistry.Manager); ok {
-		mgr.CleanupHookConns()
+	if extMgr != nil {
+		// Close connections to extension services
+		if mgr, ok := extMgr.(*extensionregistry.Manager); ok {
+			mgr.CleanupHookConns()
+		}
 	}
 
 	return nil
