@@ -1,7 +1,10 @@
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
@@ -15,24 +18,32 @@
         start: "200"
       - end: "301"
         start: "300"
+      host: '*'
       path: /healthz
       receive:
       - text: 6f6b
     interval: 3s
     timeout: 0.500s
     unhealthyThreshold: 3
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: first-route-dest
   outlierDetection:
     baseEjectionTime: 180s
+    consecutive5xx: 5
+    consecutiveGatewayFailure: 0
+    consecutiveLocalOriginFailure: 5
     interval: 2s
     maxEjectionPercent: 100
   perConnectionBufferLimitBytes: 32768
   type: EDS
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
@@ -44,24 +55,32 @@
       expectedStatuses:
       - end: "202"
         start: "200"
+      host: '*'
       path: /healthz
       receive:
       - binary: cG9uZw==
     interval: 5s
     timeout: 1s
     unhealthyThreshold: 3
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: second-route-dest
   outlierDetection:
     baseEjectionTime: 180s
+    consecutive5xx: 5
+    consecutiveGatewayFailure: 0
+    consecutiveLocalOriginFailure: 5
     interval: 1s
     maxEjectionPercent: 100
   perConnectionBufferLimitBytes: 32768
   type: EDS
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
@@ -77,18 +96,25 @@
         text: "70696e67"
     timeout: 1s
     unhealthyThreshold: 3
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: third-route-dest
   outlierDetection:
     baseEjectionTime: 160s
+    consecutive5xx: 5
+    consecutiveGatewayFailure: 0
+    consecutiveLocalOriginFailure: 5
     interval: 1s
     maxEjectionPercent: 100
   perConnectionBufferLimitBytes: 32768
   type: EDS
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
@@ -104,11 +130,40 @@
         binary: cGluZw==
     timeout: 1s
     unhealthyThreshold: 3
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: fourth-route-dest
   outlierDetection:
     baseEjectionTime: 180s
+    consecutive5xx: 5
+    consecutiveGatewayFailure: 0
+    consecutiveLocalOriginFailure: 5
     interval: 1s
     maxEjectionPercent: 90
+    splitExternalLocalOriginErrors: true
+  perConnectionBufferLimitBytes: 32768
+  type: EDS
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
+    localityWeightedLbConfig: {}
+  connectTimeout: 10s
+  dnsLookupFamily: V4_PREFERRED
+  edsClusterConfig:
+    edsConfig:
+      ads: {}
+      resourceApiVersion: V3
+    serviceName: fifth-route-dest
+  healthChecks:
+  - grpcHealthCheck:
+      serviceName: my-service
+    healthyThreshold: 3
+    interval: 5s
+    timeout: 1s
+    unhealthyThreshold: 3
+  ignoreHealthOnHostRemoval: true
+  lbPolicy: LEAST_REQUEST
+  name: fifth-route-dest
   perConnectionBufferLimitBytes: 32768
   type: EDS

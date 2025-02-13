@@ -5,6 +5,44 @@ xds:
     - activeState:
         listener:
           '@type': type.googleapis.com/envoy.config.listener.v3.Listener
+          address:
+            socketAddress:
+              address: 0.0.0.0
+              portValue: 19003
+          filterChains:
+          - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typedConfig:
+                '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                httpFilters:
+                - name: envoy.filters.http.health_check
+                  typedConfig:
+                    '@type': type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+                    headers:
+                    - name: :path
+                      stringMatch:
+                        exact: /ready
+                    passThroughMode: false
+                - name: envoy.filters.http.router
+                  typedConfig:
+                    '@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                    suppressEnvoyHeaders: true
+                routeConfig:
+                  name: ready_route
+                  virtualHosts:
+                  - domains:
+                    - '*'
+                    name: ready_route
+                    routes:
+                    - directResponse:
+                        status: 500
+                      match:
+                        prefix: /
+                statPrefix: eg-ready-http
+          name: envoy-gateway-proxy-ready-0.0.0.0-19003
+    - activeState:
+        listener:
+          '@type': type.googleapis.com/envoy.config.listener.v3.Listener
           accessLog:
           - filter:
               responseFlagFilter:
@@ -49,6 +87,10 @@ xds:
                     providers:
                       httproute/envoy-gateway-system/backend/rule/0/match/0/www_example_com/example:
                         forward: true
+                        normalizePayloadInMetadata:
+                          spaceDelimitedClaims:
+                          - scope
+                        payloadInMetadata: example
                         remoteJwks:
                           asyncFetch: {}
                           cacheDuration: 300s
@@ -56,7 +98,6 @@ xds:
                             cluster: raw_githubusercontent_com_443
                             timeout: 10s
                             uri: https://raw.githubusercontent.com/envoyproxy/gateway/main/examples/kubernetes/jwt/jwks.json
-                          retryPolicy: {}
                     requirementMap:
                       httproute/envoy-gateway-system/backend/rule/0/match/0/www_example_com:
                         providerName: httproute/envoy-gateway-system/backend/rule/0/match/0/www_example_com/example
@@ -73,7 +114,8 @@ xds:
                     resourceApiVersion: V3
                   routeConfigName: envoy-gateway-system/eg/http
                 serverHeaderTransformation: PASS_THROUGH
-                statPrefix: http
+                statPrefix: http-10080
                 useRemoteAddress: true
+            name: envoy-gateway-system/eg/http
           name: envoy-gateway-system/eg/http
           perConnectionBufferLimitBytes: 32768

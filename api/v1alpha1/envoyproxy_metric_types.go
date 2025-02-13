@@ -15,6 +15,7 @@ type ProxyMetrics struct {
 	// Prometheus defines the configuration for Admin endpoint `/stats/prometheus`.
 	Prometheus *ProxyPrometheusProvider `json:"prometheus,omitempty"`
 	// Sinks defines the metric sinks where metrics are sent to.
+	// +kubebuilder:validation:MaxItems=16
 	Sinks []ProxyMetricSink `json:"sinks,omitempty"`
 	// Matches defines configuration for selecting specific metrics instead of generating all metrics stats
 	// that are enabled by default. This helps reduce CPU and memory overhead in Envoy, but eliminating some stats
@@ -26,7 +27,20 @@ type ProxyMetrics struct {
 	Matches []StringMatch `json:"matches,omitempty"`
 
 	// EnableVirtualHostStats enables envoy stat metrics for virtual hosts.
-	EnableVirtualHostStats bool `json:"enableVirtualHostStats,omitempty"`
+	//
+	// +optional
+	EnableVirtualHostStats *bool `json:"enableVirtualHostStats,omitempty"`
+
+	// EnablePerEndpointStats enables per endpoint envoy stats metrics.
+	// Please use with caution.
+	//
+	// +optional
+	EnablePerEndpointStats *bool `json:"enablePerEndpointStats,omitempty"`
+
+	// EnableRequestResponseSizesStats enables publishing of histograms tracking header and body sizes of requests and responses.
+	//
+	// +optional
+	EnableRequestResponseSizesStats *bool `json:"enableRequestResponseSizesStats,omitempty"`
 }
 
 // ProxyMetricSink defines the sink of metrics.
@@ -47,10 +61,21 @@ type ProxyMetricSink struct {
 	OpenTelemetry *ProxyOpenTelemetrySink `json:"openTelemetry,omitempty"`
 }
 
+// ProxyOpenTelemetrySink defines the configuration for OpenTelemetry sink.
+//
+// +kubebuilder:validation:XValidation:message="host or backendRefs needs to be set",rule="has(self.host) || self.backendRefs.size() > 0"
+// +kubebuilder:validation:XValidation:message="BackendRefs must be used, backendRef is not supported.",rule="!has(self.backendRef)"
+// +kubebuilder:validation:XValidation:message="only supports Service kind.",rule="has(self.backendRefs) ? self.backendRefs.all(f, f.kind == 'Service') : true"
+// +kubebuilder:validation:XValidation:message="BackendRefs only supports Core group.",rule="has(self.backendRefs) ? (self.backendRefs.all(f, f.group == \"\")) : true"
 type ProxyOpenTelemetrySink struct {
+	BackendCluster `json:",inline"`
 	// Host define the service hostname.
-	Host string `json:"host"`
+	// Deprecated: Use BackendRefs instead.
+	//
+	// +optional
+	Host *string `json:"host,omitempty"`
 	// Port defines the port the service is exposed on.
+	// Deprecated: Use BackendRefs instead.
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
@@ -64,4 +89,7 @@ type ProxyOpenTelemetrySink struct {
 type ProxyPrometheusProvider struct {
 	// Disable the Prometheus endpoint.
 	Disable bool `json:"disable,omitempty"`
+	// Configure the compression on Prometheus endpoint. Compression is useful in situations when bandwidth is scarce and large payloads can be effectively compressed at the expense of higher CPU load.
+	// +optional
+	Compression *Compression `json:"compression,omitempty"`
 }

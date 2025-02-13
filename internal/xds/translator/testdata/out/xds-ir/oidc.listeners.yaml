@@ -1,6 +1,6 @@
 - address:
     socketAddress:
-      address: 0.0.0.0
+      address: '::'
       portValue: 10080
   defaultFilterChain:
     filters:
@@ -15,7 +15,7 @@
           maxConcurrentStreams: 100
         httpFilters:
         - disabled: true
-          name: envoy.filters.http.oauth2_first-route
+          name: envoy.filters.http.oauth2/securitypolicy/default/policy-for-first-route
           typedConfig:
             '@type': type.googleapis.com/envoy.extensions.filters.http.oauth2.v3.OAuth2
             config:
@@ -28,26 +28,31 @@
               credentials:
                 clientId: client.oauth.foo.com
                 cookieNames:
-                  bearerToken: BearerToken-5F93C2E4
+                  bearerToken: AccessToken-5F93C2E4
                   idToken: IdToken-5F93C2E4
                   oauthExpires: OauthExpires-5F93C2E4
                   oauthHmac: OauthHMAC-5F93C2E4
+                  oauthNonce: OauthNonce-5F93C2E4
                   refreshToken: RefreshToken-5F93C2E4
                 hmacSecret:
-                  name: first-route/oauth2/hmac_secret
+                  name: oauth2/hmac_secret/securitypolicy/default/policy-for-first-route
                   sdsConfig:
                     ads: {}
                     resourceApiVersion: V3
                 tokenSecret:
-                  name: first-route/oauth2/client_secret
+                  name: oauth2/client_secret/securitypolicy/default/policy-for-first-route
                   sdsConfig:
                     ads: {}
                     resourceApiVersion: V3
+              defaultExpiresIn: 3600s
+              defaultRefreshTokenExpiresIn: 172800s
               forwardBearerToken: true
               redirectPathMatcher:
                 path:
                   exact: /foo/oauth2/callback
               redirectUri: https://www.example.com/foo/oauth2/callback
+              resources:
+              - api
               signoutPath:
                 path:
                   exact: /foo/logout
@@ -55,8 +60,9 @@
                 cluster: oauth_foo_com_443
                 timeout: 10s
                 uri: https://oauth.foo.com/token
+              useRefreshToken: true
         - disabled: true
-          name: envoy.filters.http.oauth2_second-route
+          name: envoy.filters.http.oauth2/securitypolicy/default/policy-for-second-route
           typedConfig:
             '@type': type.googleapis.com/envoy.extensions.filters.http.oauth2.v3.OAuth2
             config:
@@ -68,27 +74,31 @@
               authorizationEndpoint: https://oauth.bar.com/oauth2/v2/auth
               credentials:
                 clientId: client.oauth.bar.com
+                cookieDomain: example.com
                 cookieNames:
-                  bearerToken: BearerToken-5f93c2e4
-                  idToken: IdToken-5f93c2e4
+                  bearerToken: CustomAccessTokenOverride
+                  idToken: CustomIdTokenOverride
                   oauthExpires: OauthExpires-5f93c2e4
                   oauthHmac: OauthHMAC-5f93c2e4
+                  oauthNonce: OauthNonce-5f93c2e4
                   refreshToken: RefreshToken-5f93c2e4
                 hmacSecret:
-                  name: second-route/oauth2/hmac_secret
+                  name: oauth2/hmac_secret/securitypolicy/default/policy-for-second-route
                   sdsConfig:
                     ads: {}
                     resourceApiVersion: V3
                 tokenSecret:
-                  name: second-route/oauth2/client_secret
+                  name: oauth2/client_secret/securitypolicy/default/policy-for-second-route
                   sdsConfig:
                     ads: {}
                     resourceApiVersion: V3
-              forwardBearerToken: true
+              preserveAuthorizationHeader: true
               redirectPathMatcher:
                 path:
                   exact: /bar/oauth2/callback
               redirectUri: https://www.example.com/bar/oauth2/callback
+              resources:
+              - api
               signoutPath:
                 path:
                   exact: /bar/logout
@@ -96,6 +106,7 @@
                 cluster: oauth_bar_com_443
                 timeout: 10s
                 uri: https://oauth.bar.com/token
+              useRefreshToken: false
         - name: envoy.filters.http.router
           typedConfig:
             '@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -109,7 +120,8 @@
             resourceApiVersion: V3
           routeConfigName: first-listener
         serverHeaderTransformation: PASS_THROUGH
-        statPrefix: http
+        statPrefix: http-10080
         useRemoteAddress: true
+    name: first-listener
   name: first-listener
   perConnectionBufferLimitBytes: 32768

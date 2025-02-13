@@ -18,7 +18,7 @@ GO_VERSION = $(shell grep -oE "^go [[:digit:]]*\.[[:digit:]]*" go.mod | cut -d' 
 
 # Build the target binary in target platform.
 # The pattern of build.% is `build.{Platform}.{Command}`.
-# If we want to build envoy-gateway in linux amd64 platform, 
+# If we want to build envoy-gateway in linux amd64 platform,
 # just execute make go.build.linux_amd64.envoy-gateway.
 .PHONY: go.build.%
 go.build.%:
@@ -49,24 +49,44 @@ go.testdata.complete: ## Override test ouputdata
 	@$(LOG_TARGET)
 	go test -timeout 30s github.com/envoyproxy/gateway/internal/xds/translator --override-testdata=true
 	go test -timeout 30s github.com/envoyproxy/gateway/internal/cmd/egctl --override-testdata=true
-	go test -timeout 30s github.com/envoyproxy/gateway/internal/gatewayapi --override-testdata=true
+	go test -timeout 30s github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/ratelimit --override-testdata=true
+	go test -timeout 30s github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/proxy --override-testdata=true
+	go test -timeout 30s github.com/envoyproxy/gateway/internal/xds/bootstrap --override-testdata=true
+	go test -timeout 60s github.com/envoyproxy/gateway/internal/gatewayapi --override-testdata=true
+	go test -timeout 60s github.com/envoyproxy/gateway/internal/gatewayapi/resource --override-testdata=true
 
 .PHONY: go.test.coverage
-go.test.coverage: $(tools/setup-envtest) ## Run go unit and integration tests in GitHub Actions
+go.test.coverage: go.test.cel ## Run go unit and integration tests in GitHub Actions
 	@$(LOG_TARGET)
 	KUBEBUILDER_ASSETS="$(shell $(tools/setup-envtest) use $(ENVTEST_K8S_VERSION) -p path)" \
-		go test ./... --tags=integration,celvalidation -race -coverprofile=coverage.xml -covermode=atomic
+		go test ./... --tags=integration -race -coverprofile=coverage.xml -covermode=atomic
+
+.PHONY: go.test.cel
+go.test.cel: manifests $(tools/setup-envtest) # Run the CEL validation tests
+	@$(LOG_TARGET)
+	@for ver in $(ENVTEST_K8S_VERSIONS); do \
+  		echo "Run CEL Validation on k8s $$ver"; \
+        go clean -testcache; \
+        KUBEBUILDER_ASSETS="$$($(tools/setup-envtest) use $$ver -p path)" \
+         go test ./test/cel-validation --tags celvalidation -race; \
+    done
 
 .PHONY: go.clean
 go.clean: ## Clean the building output files
 	@$(LOG_TARGET)
 	rm -rf $(OUTPUT_DIR)
 
+.PHONY: go.mod.tidy
+go.mod.tidy: ## Update and check dependences with go mod tidy.
+	@$(LOG_TARGET)
+	go mod tidy -compat=$(GO_VERSION)
+	# run go mod tidy in examples/extension-server directory
+	cd examples/extension-server && go mod tidy -compat=$(GO_VERSION)
+
 .PHONY: go.mod.lint
 lint: go.mod.lint
-go.mod.lint:
+go.mod.lint: go.mod.tidy go.mod.tidy.examples ## Check if go.mod is clean
 	@$(LOG_TARGET)
-	@go mod tidy -compat=$(GO_VERSION)
 	@if test -n "$$(git status -s -- go.mod go.sum)"; then \
 		git diff --exit-code go.mod; \
 		git diff --exit-code go.sum; \

@@ -6,9 +6,12 @@
 package v1alpha1
 
 import (
-	"fmt"
+	"net"
+	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // DefaultEnvoyGateway returns a new EnvoyGateway with default configuration parameters.
@@ -38,6 +41,14 @@ func (e *EnvoyGateway) SetEnvoyGatewayDefaults() {
 	}
 	if e.Provider == nil {
 		e.Provider = DefaultEnvoyGatewayProvider()
+	}
+	if e.Provider.Kubernetes == nil {
+		e.Provider.Kubernetes = &EnvoyGatewayKubernetesProvider{
+			LeaderElection: DefaultLeaderElection(),
+		}
+	}
+	if e.Provider.Kubernetes.LeaderElection == nil {
+		e.Provider.Kubernetes.LeaderElection = DefaultLeaderElection()
 	}
 	if e.Gateway == nil {
 		e.Gateway = DefaultGateway()
@@ -70,7 +81,7 @@ func (e *EnvoyGateway) GetEnvoyGatewayAdmin() *EnvoyGatewayAdmin {
 func (e *EnvoyGateway) GetEnvoyGatewayAdminAddress() string {
 	address := e.GetEnvoyGatewayAdmin().Address
 	if address != nil {
-		return fmt.Sprintf("%s:%d", address.Host, address.Port)
+		return net.JoinHostPort(address.Host, strconv.Itoa(address.Port))
 	}
 
 	return ""
@@ -83,6 +94,16 @@ func (e *EnvoyGateway) NamespaceMode() bool {
 		e.Provider.Kubernetes.Watch != nil &&
 		e.Provider.Kubernetes.Watch.Type == KubernetesWatchModeTypeNamespaces &&
 		len(e.Provider.Kubernetes.Watch.Namespaces) > 0
+}
+
+// DefaultLeaderElection returns a new LeaderElection with default configuration parameters.
+func DefaultLeaderElection() *LeaderElection {
+	return &LeaderElection{
+		RenewDeadline: ptr.To(gwapiv1.Duration("10s")),
+		RetryPeriod:   ptr.To(gwapiv1.Duration("2s")),
+		LeaseDuration: ptr.To(gwapiv1.Duration("15s")),
+		Disable:       ptr.To(false),
+	}
 }
 
 // DefaultGateway returns a new Gateway with default configuration parameters.
@@ -148,6 +169,9 @@ func DefaultEnvoyGatewayPrometheus() *EnvoyGatewayPrometheusProvider {
 func DefaultEnvoyGatewayProvider() *EnvoyGatewayProvider {
 	return &EnvoyGatewayProvider{
 		Type: ProviderTypeKubernetes,
+		Kubernetes: &EnvoyGatewayKubernetesProvider{
+			LeaderElection: DefaultLeaderElection(),
+		},
 	}
 }
 
@@ -195,7 +219,14 @@ func (r *EnvoyGatewayProvider) GetEnvoyGatewayKubeProvider() *EnvoyGatewayKubern
 
 	if r.Kubernetes == nil {
 		r.Kubernetes = DefaultEnvoyGatewayKubeProvider()
+		if r.Kubernetes.LeaderElection == nil {
+			r.Kubernetes.LeaderElection = DefaultLeaderElection()
+		}
 		return r.Kubernetes
+	}
+
+	if r.Kubernetes.LeaderElection == nil {
+		r.Kubernetes.LeaderElection = DefaultLeaderElection()
 	}
 
 	if r.Kubernetes.RateLimitDeployment == nil {
@@ -204,7 +235,25 @@ func (r *EnvoyGatewayProvider) GetEnvoyGatewayKubeProvider() *EnvoyGatewayKubern
 
 	r.Kubernetes.RateLimitDeployment.defaultKubernetesDeploymentSpec(DefaultRateLimitImage)
 
+	if r.Kubernetes.RateLimitHpa != nil {
+		r.Kubernetes.RateLimitHpa.setDefault()
+	}
+
+	if r.Kubernetes.ShutdownManager == nil {
+		r.Kubernetes.ShutdownManager = &ShutdownManager{Image: ptr.To(DefaultShutdownManagerImage)}
+	}
+
 	return r.Kubernetes
+}
+
+func (r *EnvoyGatewayProvider) IsRunningOnKubernetes() bool {
+	return r.Type == ProviderTypeKubernetes
+}
+
+func (r *EnvoyGatewayProvider) IsRunningOnHost() bool {
+	return r.Type == ProviderTypeCustom &&
+		r.Custom.Infrastructure != nil &&
+		r.Custom.Infrastructure.Type == InfrastructureProviderTypeHost
 }
 
 // DefaultEnvoyGatewayLoggingLevel returns a new EnvoyGatewayLogging with default configuration parameters.

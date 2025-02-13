@@ -9,21 +9,33 @@ admins:
 
 maintainers:
 
-- AliceProxy
 - arkodg
 - Xunzhuo
 - zirain
-- qicz
 - zhaohuabing
+- guydc
+- shawnh2
+
+emeritus-maintainers:
+
+- alexgervais
+- danehans
+- LukeShu
+- skriss
+- youngnick
+- qicz
+- Alice-Lilith
 
 reviewers:
 
-- chauhanshubham
 - kflynn
-- LanceEa
-- tmsnan
 - tanujd11
 - cnvergence
-- shawnh2
-- guydc
 - liorokman
+- rudrakhp
+- sanposhiho
+
+emeritus-reviewers:
+
+- chauhanshubham
+- tmsnan

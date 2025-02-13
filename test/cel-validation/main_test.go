@@ -4,7 +4,6 @@
 // the root of the repo.
 
 //go:build celvalidation
-// +build celvalidation
 
 package celvalidation
 
@@ -28,6 +27,10 @@ import (
 var c client.Client
 
 func TestMain(m *testing.M) {
+	os.Exit(runTest(m))
+}
+
+func runTest(m *testing.M) int {
 	// Setup the test environment.
 	testEnv, restCfg, err := startEnv()
 	if err != nil {
@@ -47,8 +50,7 @@ func TestMain(m *testing.M) {
 		panic(fmt.Sprintf("Error initializing client: %v", err))
 	}
 	_ = egv1a1.AddToScheme(c.Scheme())
-
-	os.Exit(m.Run())
+	return m.Run()
 }
 
 func startEnv() (*envtest.Environment, *rest.Config, error) {

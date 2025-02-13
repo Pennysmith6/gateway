@@ -4,7 +4,6 @@
 // the root of the repo.
 
 //go:build e2e
-// +build e2e
 
 package e2e
 
@@ -12,3 +11,6 @@ import "embed"
 
 //go:embed testdata/*.yaml base/*
 var Manifests embed.FS
+
+//go:embed testdata/*.yaml upgrade/*
+var UpgradeManifests embed.FS

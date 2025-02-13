@@ -6,6 +6,11 @@ ignore: |
   # after running `make generate-manifests` which creates
   # the Install YAML in bin/
   charts/gateway-helm/
+  charts/gateway-addons-helm/
+  bin/install.yaml
+  test/helm/
+  examples/extension-server/charts/extension-server
+  site/node_modules/
 
 rules:
   braces:
@@ -26,7 +31,7 @@ rules:
     min-spaces-after: 1
     max-spaces-after: 1
   comments:
-    level: warning
+    level: error
     require-starting-space: true
     min-spaces-from-content: 2
   comments-indentation:
