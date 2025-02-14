@@ -1,6 +1,6 @@
 - address:
     socketAddress:
-      address: 0.0.0.0
+      address: '::'
       portValue: 10080
   defaultFilterChain:
     filters:
@@ -27,8 +27,9 @@
             resourceApiVersion: V3
           routeConfigName: third-listener
         serverHeaderTransformation: PASS_THROUGH
-        statPrefix: http
+        statPrefix: http-10080
         useRemoteAddress: true
+    name: third-listener
   filterChains:
   - filterChainMatch:
       serverNames:
@@ -57,8 +58,9 @@
             resourceApiVersion: V3
           routeConfigName: first-listener
         serverHeaderTransformation: PASS_THROUGH
-        statPrefix: https
+        statPrefix: https-10080
         useRemoteAddress: true
+    name: first-listener
     transportSocket:
       name: envoy.transport_sockets.tls
       typedConfig:
@@ -72,6 +74,8 @@
             sdsConfig:
               ads: {}
               resourceApiVersion: V3
+        disableStatefulSessionResumption: true
+        disableStatelessSessionResumption: true
   - filterChainMatch:
       serverNames:
       - foo.net
@@ -99,8 +103,9 @@
             resourceApiVersion: V3
           routeConfigName: second-listener
         serverHeaderTransformation: PASS_THROUGH
-        statPrefix: https
+        statPrefix: https-10080
         useRemoteAddress: true
+    name: second-listener
     transportSocket:
       name: envoy.transport_sockets.tls
       typedConfig:
@@ -114,6 +119,8 @@
             sdsConfig:
               ads: {}
               resourceApiVersion: V3
+        disableStatefulSessionResumption: true
+        disableStatelessSessionResumption: true
   - filterChainMatch:
       serverNames:
       - bar.com
@@ -122,7 +129,8 @@
       typedConfig:
         '@type': type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
         cluster: tcp-route-dest
-        statPrefix: passthrough
+        statPrefix: tls-passthrough-10080
+    name: fifth-route
   - filterChainMatch:
       serverNames:
       - bar.net
@@ -131,7 +139,8 @@
       typedConfig:
         '@type': type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
         cluster: tls-route-dest
-        statPrefix: passthrough
+        statPrefix: tls-passthrough-10080
+    name: sixth-route
   listenerFilters:
   - name: envoy.filters.listener.tls_inspector
     typedConfig:

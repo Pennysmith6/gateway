@@ -21,7 +21,7 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/envoyproxy/gateway/api/v1alpha1"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	extensionTypes "github.com/envoyproxy/gateway/internal/extension/types"
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/internal/xds/types"
@@ -35,7 +35,10 @@ func processExtensionPostRouteHook(route *routev3.Route, vHost *routev3.VirtualH
 
 	// Check if an extension want to modify the route that was just configured/created
 	extManager := *em
-	extRouteHookClient := extManager.GetPostXDSHookClient(v1alpha1.XDSRoute)
+	extRouteHookClient, err := extManager.GetPostXDSHookClient(egv1a1.XDSRoute)
+	if err != nil {
+		return err
+	}
 	if extRouteHookClient == nil {
 		return nil
 	}
@@ -71,7 +74,10 @@ func processExtensionPostVHostHook(vHost *routev3.VirtualHost, em *extensionType
 
 	// Check if an extension want to modify the route that was just configured/created
 	extManager := *em
-	extVHHookClient := extManager.GetPostXDSHookClient(v1alpha1.XDSVirtualHost)
+	extVHHookClient, err := extManager.GetPostXDSHookClient(egv1a1.XDSVirtualHost)
+	if err != nil {
+		return err
+	}
 	if extVHHookClient == nil {
 		return nil
 	}
@@ -92,7 +98,7 @@ func processExtensionPostVHostHook(vHost *routev3.VirtualHost, em *extensionType
 	return nil
 }
 
-func processExtensionPostListenerHook(tCtx *types.ResourceVersionTable, xdsListener *listenerv3.Listener, em *extensionTypes.Manager) error {
+func processExtensionPostListenerHook(tCtx *types.ResourceVersionTable, xdsListener *listenerv3.Listener, extensionRefs []*ir.UnstructuredRef, em *extensionTypes.Manager) error {
 	// Do nothing unless there is an extension manager
 	if em == nil {
 		return nil
@@ -100,9 +106,16 @@ func processExtensionPostListenerHook(tCtx *types.ResourceVersionTable, xdsListe
 
 	// Check if an extension want to modify the listener that was just configured/created
 	extManager := *em
-	extListenerHookClient := extManager.GetPostXDSHookClient(v1alpha1.XDSHTTPListener)
+	extListenerHookClient, err := extManager.GetPostXDSHookClient(egv1a1.XDSHTTPListener)
+	if err != nil {
+		return err
+	}
 	if extListenerHookClient != nil {
-		modifiedListener, err := extListenerHookClient.PostHTTPListenerModifyHook(xdsListener)
+		unstructuredResources := make([]*unstructured.Unstructured, len(extensionRefs))
+		for refIdx, ref := range extensionRefs {
+			unstructuredResources[refIdx] = ref.Object
+		}
+		modifiedListener, err := extListenerHookClient.PostHTTPListenerModifyHook(xdsListener, unstructuredResources)
 		if err != nil {
 			return err
 		} else if modifiedListener != nil {
@@ -136,7 +149,10 @@ func processExtensionPostTranslationHook(tCtx *types.ResourceVersionTable, em *e
 	// that is non-static. If a cluster definition is unlikely to change over the course of an extension's lifetime then the custom bootstrap config
 	// is the preferred way of adding it.
 	extManager := *em
-	extensionInsertHookClient := extManager.GetPostXDSHookClient(v1alpha1.XDSTranslation)
+	extensionInsertHookClient, err := extManager.GetPostXDSHookClient(egv1a1.XDSTranslation)
+	if err != nil {
+		return err
+	}
 	if extensionInsertHookClient == nil {
 		return nil
 	}

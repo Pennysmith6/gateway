@@ -17,14 +17,21 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: HTTPRoute
       name: httproute-1
-      namespace: default
   status:
-    conditions:
-    - lastTransitionTime: null
-      message: BackendTrafficPolicy has been accepted.
-      reason: Accepted
-      status: "True"
-      type: Accepted
+    ancestors:
+    - ancestorRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: gateway-2
+        namespace: envoy-gateway
+        sectionName: http
+      conditions:
+      - lastTransitionTime: null
+        message: Policy has been accepted.
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: BackendTrafficPolicy
   metadata:
@@ -43,14 +50,21 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: GRPCRoute
       name: grpcroute-1
-      namespace: default
   status:
-    conditions:
-    - lastTransitionTime: null
-      message: BackendTrafficPolicy has been accepted.
-      reason: Accepted
-      status: "True"
-      type: Accepted
+    ancestors:
+    - ancestorRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: gateway-1
+        namespace: envoy-gateway
+        sectionName: http
+      conditions:
+      - lastTransitionTime: null
+        message: Policy has been accepted.
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: BackendTrafficPolicy
   metadata:
@@ -66,14 +80,26 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: Gateway
       name: gateway-2
-      namespace: envoy-gateway
   status:
-    conditions:
-    - lastTransitionTime: null
-      message: BackendTrafficPolicy has been accepted.
-      reason: Accepted
-      status: "True"
-      type: Accepted
+    ancestors:
+    - ancestorRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: gateway-2
+        namespace: envoy-gateway
+      conditions:
+      - lastTransitionTime: null
+        message: Policy has been accepted.
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: null
+        message: 'This policy is being overridden by other backendTrafficPolicies
+          for these routes: [default/httproute-1]'
+        reason: Overridden
+        status: "True"
+        type: Overridden
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
 gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
@@ -274,7 +300,7 @@ infraIR:
         name: envoy-gateway/gateway-1/http
         ports:
         - containerPort: 10080
-          name: http
+          name: http-80
           protocol: HTTP
           servicePort: 80
       metadata:
@@ -289,7 +315,7 @@ infraIR:
         name: envoy-gateway/gateway-2/http
         ports:
         - containerPort: 10080
-          name: http
+          name: http-80
           protocol: HTTP
           servicePort: 80
       metadata:
@@ -307,16 +333,18 @@ xdsIR:
       hostnames:
       - '*'
       isHTTP2: true
+      metadata:
+        kind: Gateway
+        name: gateway-1
+        namespace: envoy-gateway
+        sectionName: http
       name: envoy-gateway/gateway-1/http
       path:
         escapedSlashesAction: UnescapeAndRedirect
         mergeSlashes: true
       port: 10080
       routes:
-      - backendWeights:
-          invalid: 0
-          valid: 0
-        destination:
+      - destination:
           name: grpcroute/default/grpcroute-1/rule/0
           settings:
           - addressType: IP
@@ -325,16 +353,26 @@ xdsIR:
               port: 8080
             protocol: GRPC
             weight: 1
-        faultInjection:
-          abort:
-            grpcStatus: 14
-            percentage: 100
-          delay:
-            fixedDelay: 5.4s
-            percentage: 80
         hostname: '*'
         isHTTP2: true
+        metadata:
+          kind: GRPCRoute
+          name: grpcroute-1
+          namespace: default
         name: grpcroute/default/grpcroute-1/rule/0/match/-1/*
+        traffic:
+          faultInjection:
+            abort:
+              grpcStatus: 14
+              percentage: 100
+            delay:
+              fixedDelay: 5.4s
+              percentage: 80
+    readyListener:
+      address: 0.0.0.0
+      ipFamily: IPv4
+      path: /ready
+      port: 19003
   envoy-gateway/gateway-2:
     accessLog:
       text:
@@ -344,16 +382,18 @@ xdsIR:
       hostnames:
       - '*'
       isHTTP2: false
+      metadata:
+        kind: Gateway
+        name: gateway-2
+        namespace: envoy-gateway
+        sectionName: http
       name: envoy-gateway/gateway-2/http
       path:
         escapedSlashesAction: UnescapeAndRedirect
         mergeSlashes: true
       port: 10080
       routes:
-      - backendWeights:
-          invalid: 0
-          valid: 0
-        destination:
+      - destination:
           name: httproute/default/httproute-2/rule/0
           settings:
           - addressType: IP
@@ -362,21 +402,23 @@ xdsIR:
               port: 8080
             protocol: HTTP
             weight: 1
-        faultInjection:
-          abort:
-            httpStatus: 14
-            percentage: 0.01
         hostname: gateway.envoyproxy.io
         isHTTP2: false
+        metadata:
+          kind: HTTPRoute
+          name: httproute-2
+          namespace: default
         name: httproute/default/httproute-2/rule/0/match/0/gateway_envoyproxy_io
         pathMatch:
           distinct: false
           name: ""
           prefix: /route2
-      - backendWeights:
-          invalid: 0
-          valid: 0
-        destination:
+        traffic:
+          faultInjection:
+            abort:
+              httpStatus: 14
+              percentage: 0.01
+      - destination:
           name: httproute/default/httproute-1/rule/0
           settings:
           - addressType: IP
@@ -385,17 +427,27 @@ xdsIR:
               port: 8080
             protocol: HTTP
             weight: 1
-        faultInjection:
-          abort:
-            httpStatus: 500
-            percentage: 100
-          delay:
-            fixedDelay: 5.4s
-            percentage: 80
         hostname: gateway.envoyproxy.io
         isHTTP2: false
+        metadata:
+          kind: HTTPRoute
+          name: httproute-1
+          namespace: default
         name: httproute/default/httproute-1/rule/0/match/0/gateway_envoyproxy_io
         pathMatch:
           distinct: false
           name: ""
           prefix: /
+        traffic:
+          faultInjection:
+            abort:
+              httpStatus: 500
+              percentage: 100
+            delay:
+              fixedDelay: 5.4s
+              percentage: 80
+    readyListener:
+      address: 0.0.0.0
+      ipFamily: IPv4
+      path: /ready
+      port: 19003

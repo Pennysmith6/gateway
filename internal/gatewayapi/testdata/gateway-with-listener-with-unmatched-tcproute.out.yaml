@@ -45,7 +45,7 @@ infraIR:
         name: envoy-gateway/gateway-1/tcp
         ports:
         - containerPort: 10080
-          name: tcp
+          name: tcp-80
           protocol: TCP
           servicePort: 80
       metadata:
@@ -58,3 +58,12 @@ xdsIR:
     accessLog:
       text:
       - path: /dev/stdout
+    readyListener:
+      address: 0.0.0.0
+      ipFamily: IPv4
+      path: /ready
+      port: 19003
+    tcp:
+    - address: 0.0.0.0
+      name: envoy-gateway/gateway-1/tcp
+      port: 10080

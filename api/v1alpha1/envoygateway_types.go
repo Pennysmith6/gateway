@@ -6,6 +6,7 @@
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -90,6 +91,21 @@ type EnvoyGatewaySpec struct {
 	ExtensionAPIs *ExtensionAPISettings `json:"extensionApis,omitempty"`
 }
 
+// LeaderElection defines the desired leader election settings.
+type LeaderElection struct {
+	// LeaseDuration defines the time non-leader contenders will wait before attempting to claim leadership.
+	// It's based on the timestamp of the last acknowledged signal. The default setting is 15 seconds.
+	LeaseDuration *gwapiv1.Duration `json:"leaseDuration,omitempty"`
+	// RenewDeadline represents the time frame within which the current leader will attempt to renew its leadership
+	// status before relinquishing its position. The default setting is 10 seconds.
+	RenewDeadline *gwapiv1.Duration `json:"renewDeadline,omitempty"`
+	// RetryPeriod denotes the interval at which LeaderElector clients should perform action retries.
+	// The default setting is 2 seconds.
+	RetryPeriod *gwapiv1.Duration `json:"retryPeriod,omitempty"`
+	// Disable provides the option to turn off leader election, which is enabled by default.
+	Disable *bool `json:"disable,omitempty"`
+}
+
 // EnvoyGatewayTelemetry defines telemetry configurations for envoy gateway control plane.
 // Control plane will focus on metrics observability telemetry and tracing telemetry later.
 type EnvoyGatewayTelemetry struct {
@@ -140,7 +156,7 @@ type Gateway struct {
 	// ControllerName defines the name of the Gateway API controller. If unspecified,
 	// defaults to "gateway.envoyproxy.io/gatewayclass-controller". See the following
 	// for additional details:
-	//   https://gateway-api.sigs.k8s.io/v1alpha2/references/spec/#gateway.networking.k8s.io/v1.GatewayClass
+	//   https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.GatewayClass
 	//
 	// +optional
 	ControllerName string `json:"controllerName,omitempty"`
@@ -151,12 +167,15 @@ type ExtensionAPISettings struct {
 	// EnableEnvoyPatchPolicy enables Envoy Gateway to
 	// reconcile and implement the EnvoyPatchPolicy resources.
 	EnableEnvoyPatchPolicy bool `json:"enableEnvoyPatchPolicy"`
+	// EnableBackend enables Envoy Gateway to
+	// reconcile and implement the Backend resources.
+	EnableBackend bool `json:"enableBackend"`
 }
 
 // EnvoyGatewayProvider defines the desired configuration of a provider.
 // +union
 type EnvoyGatewayProvider struct {
-	// Type is the type of provider to use. Supported types are "Kubernetes".
+	// Type is the type of provider to use. Supported types are "Kubernetes", "Custom".
 	//
 	// +unionDiscriminator
 	Type ProviderType `json:"type"`
@@ -168,7 +187,7 @@ type EnvoyGatewayProvider struct {
 	Kubernetes *EnvoyGatewayKubernetesProvider `json:"kubernetes,omitempty"`
 
 	// Custom defines the configuration for the Custom provider. This provider
-	// allows you to define a specific resource provider and a infrastructure
+	// allows you to define a specific resource provider and an infrastructure
 	// provider.
 	//
 	// +optional
@@ -184,16 +203,28 @@ type EnvoyGatewayKubernetesProvider struct {
 	// +optional
 	RateLimitDeployment *KubernetesDeploymentSpec `json:"rateLimitDeployment,omitempty"`
 
+	// RateLimitHpa defines the Horizontal Pod Autoscaler settings for Envoy ratelimit Deployment.
+	// If the HPA is set, Replicas field from RateLimitDeployment will be ignored.
+	//
+	// +optional
+	RateLimitHpa *KubernetesHorizontalPodAutoscalerSpec `json:"rateLimitHpa,omitempty"`
+
 	// Watch holds configuration of which input resources should be watched and reconciled.
 	// +optional
 	Watch *KubernetesWatchMode `json:"watch,omitempty"`
 	// Deploy holds configuration of how output managed resources such as the Envoy Proxy data plane
 	// should be deployed
 	// +optional
+	// +notImplementedHide
 	Deploy *KubernetesDeployMode `json:"deploy,omitempty"`
-	// OverwriteControlPlaneCerts updates the secrets containing the control plane certs, when set.
+	// LeaderElection specifies the configuration for leader election.
+	// If it's not set up, leader election will be active by default, using Kubernetes' standard settings.
 	// +optional
-	OverwriteControlPlaneCerts *bool `json:"overwriteControlPlaneCerts,omitempty"`
+	LeaderElection *LeaderElection `json:"leaderElection,omitempty"`
+
+	// ShutdownManager defines the configuration for the shutdown manager.
+	// +optional
+	ShutdownManager *ShutdownManager `json:"shutdownManager,omitempty"`
 }
 
 const (
@@ -228,10 +259,27 @@ type KubernetesWatchMode struct {
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
 }
 
+const (
+	// KubernetesDeployModeTypeControllerNamespace indicates that the controller namespace is used for the infra proxy deployments.
+	KubernetesDeployModeTypeControllerNamespace = "ControllerNamespace"
+
+	// KubernetesDeployModeTypeGatewayNamespace indicates that the gateway namespace is used for the infra proxy deployments.
+	KubernetesDeployModeTypeGatewayNamespace = "GatewayNamespace"
+)
+
+// KubernetesDeployModeType defines the type of KubernetesDeployMode
+type KubernetesDeployModeType string
+
 // KubernetesDeployMode holds configuration for how to deploy managed resources such as the Envoy Proxy
 // data plane fleet.
 type KubernetesDeployMode struct {
-	// TODO
+	// Type indicates what deployment mode to use. "ControllerNamespace" and
+	// "GatewayNamespace" are currently supported.
+	// By default, when this field is unset or empty, Envoy Gateway will deploy Envoy Proxy fleet in the Controller namespace.
+	// +optional
+	// +kubebuilder:default=ControllerNamespace
+	// +kubebuilder:validation:Enum=ControllerNamespace;GatewayNamespace
+	Type *KubernetesDeployModeType `json:"type,omitempty"`
 }
 
 // EnvoyGatewayCustomProvider defines configuration for the Custom provider.
@@ -245,7 +293,11 @@ type EnvoyGatewayCustomProvider struct {
 	// This provider is used to specify the provider to be used
 	// to provide an environment to deploy the out resources like
 	// the Envoy Proxy data plane.
-	Infrastructure EnvoyGatewayInfrastructureProvider `json:"infrastructure"`
+	//
+	// Infrastructure is optional, if provider is not specified,
+	// No infrastructure provider is available.
+	// +optional
+	Infrastructure *EnvoyGatewayInfrastructureProvider `json:"infrastructure,omitempty"`
 }
 
 // ResourceProviderType defines the types of custom resource providers supported by Envoy Gateway.
@@ -274,7 +326,7 @@ type EnvoyGatewayResourceProvider struct {
 // EnvoyGatewayFileResourceProvider defines configuration for the File Resource provider.
 type EnvoyGatewayFileResourceProvider struct {
 	// Paths are the paths to a directory or file containing the resource configuration.
-	// Recursive sub directories are not currently supported.
+	// Recursive subdirectories are not currently supported.
 	Paths []string `json:"paths"`
 }
 
@@ -326,6 +378,56 @@ type RateLimit struct {
 	// otherwise, don't let the traffic pass and return 500.
 	// If not set, FailClosed is False.
 	FailClosed bool `json:"failClosed"`
+
+	// Telemetry defines telemetry configuration for RateLimit.
+	// +optional
+	Telemetry *RateLimitTelemetry `json:"telemetry,omitempty"`
+}
+
+type RateLimitTelemetry struct {
+	// Metrics defines metrics configuration for RateLimit.
+	Metrics *RateLimitMetrics `json:"metrics,omitempty"`
+
+	// Tracing defines traces configuration for RateLimit.
+	Tracing *RateLimitTracing `json:"tracing,omitempty"`
+}
+
+type RateLimitMetrics struct {
+	// Prometheus defines the configuration for prometheus endpoint.
+	Prometheus *RateLimitMetricsPrometheusProvider `json:"prometheus,omitempty"`
+}
+
+type RateLimitMetricsPrometheusProvider struct {
+	// Disable the Prometheus endpoint.
+	Disable bool `json:"disable,omitempty"`
+}
+
+type RateLimitTracing struct {
+	// SamplingRate controls the rate at which traffic will be
+	// selected for tracing if no prior sampling decision has been made.
+	// Defaults to 100, valid values [0-100]. 100 indicates 100% sampling.
+	// +optional
+	SamplingRate *uint32 `json:"samplingRate,omitempty"`
+
+	// Provider defines the rateLimit tracing provider.
+	// Only OpenTelemetry is supported currently.
+	Provider *RateLimitTracingProvider `json:"provider,omitempty"`
+}
+
+type RateLimitTracingProviderType string
+
+const (
+	RateLimitTracingProviderTypeOpenTelemetry TracingProviderType = "OpenTelemetry"
+)
+
+// RateLimitTracingProvider defines the tracing provider configuration of RateLimit
+type RateLimitTracingProvider struct {
+	// Type defines the tracing provider type.
+	// Since to RateLimit Exporter currently using OpenTelemetry, only OpenTelemetry is supported
+	Type *RateLimitTracingProviderType `json:"type,omitempty"`
+
+	// URL is the endpoint of the trace collector that supports the OTLP protocol
+	URL string `json:"url"`
 }
 
 // RateLimitDatabaseBackend defines the configuration associated with
@@ -375,10 +477,17 @@ type RateLimitRedisSettings struct {
 // ExtensionManager defines the configuration for registering an extension manager to
 // the Envoy Gateway control plane.
 type ExtensionManager struct {
-	// Resources defines the set of K8s resources the extension will handle.
+	// Resources defines the set of K8s resources the extension will handle as route
+	// filter resources
 	//
 	// +optional
 	Resources []GroupVersionKind `json:"resources,omitempty"`
+
+	// PolicyResources defines the set of K8S resources the extension server will handle
+	// as directly attached GatewayAPI policies
+	//
+	// +optional
+	PolicyResources []GroupVersionKind `json:"policyResources,omitempty"`
 
 	// Hooks defines the set of hooks the extension supports
 	//
@@ -390,6 +499,27 @@ type ExtensionManager struct {
 	//
 	// +kubebuilder:validation:Required
 	Service *ExtensionService `json:"service,omitempty"`
+
+	// FailOpen defines if Envoy Gateway should ignore errors returned from the Extension Service hooks.
+	// The default is false, which means Envoy Gateway will fail closed if the Extension Service returns an error.
+	//
+	// Fail-close means that if the Extension Service hooks return an error, the relevant route/listener/resource
+	// will be replaced with a default configuration returning Internal Server Error (HTTP 500).
+	//
+	// Fail-open means that if the Extension Service hooks return an error, no changes will be applied to the
+	// source of the configuration which was sent to the extension server.
+	//
+	// +optional
+	FailOpen bool `json:"failOpen,omitempty"`
+
+	// MaxMessageSize defines the maximum message size in bytes that can be
+	// sent to or received from the Extension Service.
+	// Default: 4M
+	//
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:Pattern="^[1-9]+[0-9]*([EPTGMK]i|[EPTGMk])?$"
+	// +optional
+	MaxMessageSize *resource.Quantity `json:"maxMessageSize,omitempty"`
 }
 
 // ExtensionHooks defines extension hooks across all supported runners
@@ -406,10 +536,17 @@ type XDSTranslatorHooks struct {
 
 // ExtensionService defines the configuration for connecting to a registered extension service.
 type ExtensionService struct {
+	// BackendEndpoint points to where the extension server can be found.
+	BackendEndpoint `json:",inline"`
+
 	// Host define the extension service hostname.
-	Host string `json:"host"`
+	// Deprecated: use the appropriate transport attribute instead (FQDN,IP,Unix)
+	//
+	// +optional
+	Host string `json:"host,omitempty"`
 
 	// Port defines the port the extension service is exposed on.
+	// Deprecated: use the appropriate transport attribute instead (FQDN,IP,Unix)
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
@@ -437,7 +574,6 @@ type ExtensionTLS struct {
 
 // EnvoyGatewayAdmin defines the Envoy Gateway Admin configuration.
 type EnvoyGatewayAdmin struct {
-
 	// Address defines the address of Envoy Gateway Admin Server.
 	//
 	// +optional
@@ -465,6 +601,12 @@ type EnvoyGatewayAdminAddress struct {
 	// +optional
 	// +kubebuilder:default="127.0.0.1"
 	Host string `json:"host,omitempty"`
+}
+
+// ShutdownManager defines the configuration for the shutdown manager.
+type ShutdownManager struct {
+	// Image specifies the ShutdownManager container image to be used, instead of the default image.
+	Image *string `json:"image,omitempty"`
 }
 
 func init() {

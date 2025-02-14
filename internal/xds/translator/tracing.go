@@ -6,7 +6,6 @@
 package translator
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 
@@ -15,6 +14,8 @@ import (
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tracingtype "github.com/envoyproxy/go-control-plane/envoy/type/tracing/v3"
 	xdstype "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	"k8s.io/utils/ptr"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -23,29 +24,75 @@ import (
 	"github.com/envoyproxy/gateway/internal/xds/types"
 )
 
+const (
+	envoyOpenTelemetry = "envoy.tracers.opentelemetry"
+	envoyZipkin        = "envoy.traces.zipkin"
+	envoyDatadog       = "envoy.tracers.datadog"
+)
+
+type typConfigGen func() (*anypb.Any, error)
+
 func buildHCMTracing(tracing *ir.Tracing) (*hcm.HttpConnectionManager_Tracing, error) {
 	if tracing == nil {
 		return nil, nil
 	}
 
-	oc := &tracecfg.OpenTelemetryConfig{
-		GrpcService: &corev3.GrpcService{
-			TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-				EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-					ClusterName: buildClusterName("tracing", tracing.Provider.Host, uint32(tracing.Provider.Port)),
-					Authority:   tracing.Provider.Host,
+	var providerName string
+	var providerConfig typConfigGen
+
+	switch tracing.Provider.Type {
+	case egv1a1.TracingProviderTypeDatadog:
+		providerName = envoyDatadog
+
+		providerConfig = func() (*anypb.Any, error) {
+			config := &tracecfg.DatadogConfig{
+				ServiceName:      tracing.ServiceName,
+				CollectorCluster: tracing.Destination.Name,
+			}
+			return protocov.ToAnyWithValidation(config)
+		}
+	case egv1a1.TracingProviderTypeOpenTelemetry:
+		providerName = envoyOpenTelemetry
+
+		providerConfig = func() (*anypb.Any, error) {
+			config := &tracecfg.OpenTelemetryConfig{
+				GrpcService: &corev3.GrpcService{
+					TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+						EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
+							ClusterName: tracing.Destination.Name,
+							Authority:   tracing.Authority,
+						},
+					},
 				},
-			},
-		},
-		ServiceName: tracing.ServiceName,
+				ServiceName: tracing.ServiceName,
+			}
+
+			return protocov.ToAnyWithValidation(config)
+		}
+	case egv1a1.TracingProviderTypeZipkin:
+		providerName = envoyZipkin
+
+		providerConfig = func() (*anypb.Any, error) {
+			config := &tracecfg.ZipkinConfig{
+				CollectorCluster:         tracing.Destination.Name,
+				CollectorEndpoint:        "/api/v2/spans",
+				TraceId_128Bit:           ptr.Deref(tracing.Provider.Zipkin.Enable128BitTraceID, false),
+				SharedSpanContext:        wrapperspb.Bool(!ptr.Deref(tracing.Provider.Zipkin.DisableSharedSpanContext, false)),
+				CollectorEndpointVersion: tracecfg.ZipkinConfig_HTTP_JSON,
+			}
+
+			return protocov.ToAnyWithValidation(config)
+		}
+	default:
+		return nil, fmt.Errorf("unknown tracing provider type: %s", tracing.Provider.Type)
 	}
 
-	ocAny, err := protocov.ToAnyWithError(oc)
+	ocAny, err := providerConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal OpenTelemetryConfig: %w", err)
+		return nil, fmt.Errorf("failed to marshal tracing configuration: %w", err)
 	}
 
-	tags := []*tracingtype.CustomTag{}
+	tags := make([]*tracingtype.CustomTag, 0, len(tracing.CustomTags))
 	// TODO: consider add some default tags for better UX
 	for k, v := range tracing.CustomTags {
 		switch v.Type {
@@ -105,37 +152,43 @@ func buildHCMTracing(tracing *ir.Tracing) (*hcm.HttpConnectionManager_Tracing, e
 			Value: 100.0,
 		},
 		RandomSampling: &xdstype.Percent{
-			Value: float64(*tracing.SamplingRate),
+			Value: tracing.SamplingRate,
 		},
 		Provider: &tracecfg.Tracing_Http{
-			Name: "envoy.tracers.opentelemetry",
+			Name: providerName,
 			ConfigType: &tracecfg.Tracing_Http_TypedConfig{
 				TypedConfig: ocAny,
 			},
 		},
-		CustomTags: tags,
+		CustomTags:        tags,
+		SpawnUpstreamSpan: wrapperspb.Bool(true),
 	}, nil
 }
 
-func processClusterForTracing(tCtx *types.ResourceVersionTable, tracing *ir.Tracing) error {
+func processClusterForTracing(tCtx *types.ResourceVersionTable, tracing *ir.Tracing, metrics *ir.Metrics) error {
 	if tracing == nil {
 		return nil
 	}
 
-	clusterName := buildClusterName("tracing", tracing.Provider.Host, uint32(tracing.Provider.Port))
-
-	ds := &ir.DestinationSetting{
-		Weight:    ptr.To[uint32](1),
-		Protocol:  ir.GRPC,
-		Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint(tracing.Provider.Host, uint32(tracing.Provider.Port))},
+	traffic := tracing.Traffic
+	// Make sure that there are safe defaults for the traffic
+	if traffic == nil {
+		traffic = &ir.TrafficFeatures{}
 	}
-	if err := addXdsCluster(tCtx, &xdsClusterArgs{
-		name:         clusterName,
-		settings:     []*ir.DestinationSetting{ds},
-		tSocket:      nil,
-		endpointType: EndpointTypeDNS,
-	}); err != nil && !errors.Is(err, ErrXdsClusterExists) {
-		return err
-	}
-	return nil
+	return addXdsCluster(tCtx, &xdsClusterArgs{
+		name:              tracing.Destination.Name,
+		settings:          tracing.Destination.Settings,
+		tSocket:           nil,
+		endpointType:      EndpointTypeDNS,
+		metrics:           metrics,
+		loadBalancer:      traffic.LoadBalancer,
+		proxyProtocol:     traffic.ProxyProtocol,
+		circuitBreaker:    traffic.CircuitBreaker,
+		healthCheck:       traffic.HealthCheck,
+		timeout:           traffic.Timeout,
+		tcpkeepalive:      traffic.TCPKeepalive,
+		backendConnection: traffic.BackendConnection,
+		dns:               traffic.DNS,
+		http2Settings:     traffic.HTTP2,
+	})
 }

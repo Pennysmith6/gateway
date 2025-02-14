@@ -1,15 +1,18 @@
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
       resourceApiVersion: V3
     serviceName: first-route-dest
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: first-route-dest
-  outlierDetection: {}
   perConnectionBufferLimitBytes: 32768
   type: EDS
   typedExtensionProtocolOptions:
@@ -22,18 +25,21 @@
               name: preserve_case
               typedConfig:
                 '@type': type.googleapis.com/envoy.extensions.http.header_formatters.preserve_case.v3.PreserveCaseFormatterConfig
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
       resourceApiVersion: V3
     serviceName: second-route-dest
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: second-route-dest
-  outlierDetection: {}
   perConnectionBufferLimitBytes: 32768
   type: EDS
   typedExtensionProtocolOptions:

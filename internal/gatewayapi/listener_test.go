@@ -8,82 +8,77 @@ package gatewayapi
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	egcfgv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
-	"github.com/envoyproxy/gateway/internal/ir"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 )
 
-func TestProcessTracing(t *testing.T) {
+func TestProxySamplingRate(t *testing.T) {
 	cases := []struct {
-		gw    gwapiv1.Gateway
-		proxy *egcfgv1a1.EnvoyProxy
-
-		expected *ir.Tracing
-	}{
-		{},
-		{
-			gw: gwapiv1.Gateway{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "fake-gw",
-					Namespace: "fake-ns",
-				},
-			},
-			proxy: &egcfgv1a1.EnvoyProxy{
-				Spec: egcfgv1a1.EnvoyProxySpec{
-					Telemetry: &egcfgv1a1.ProxyTelemetry{
-						Tracing: &egcfgv1a1.ProxyTracing{},
-					},
-				},
-			},
-			expected: &ir.Tracing{
-				ServiceName:  "fake-gw.fake-ns",
-				ProxyTracing: egcfgv1a1.ProxyTracing{},
-			},
-		},
-	}
-
-	for _, c := range cases {
-		c := c
-		t.Run("", func(t *testing.T) {
-			got := processTracing(&c.gw, c.proxy)
-			assert.Equal(t, c.expected, got)
-		})
-	}
-}
-
-func TestProcessMetrics(t *testing.T) {
-	cases := []struct {
-		name  string
-		proxy *egcfgv1a1.EnvoyProxy
-
-		expected *ir.Metrics
+		name     string
+		tracing  *egv1a1.ProxyTracing
+		expected float64
 	}{
 		{
-			name: "nil proxy config",
+			name:     "default",
+			tracing:  &egv1a1.ProxyTracing{},
+			expected: 100.0,
 		},
 		{
-			name: "virtual host stats enabled",
-			proxy: &egcfgv1a1.EnvoyProxy{
-				Spec: egcfgv1a1.EnvoyProxySpec{
-					Telemetry: &egcfgv1a1.ProxyTelemetry{
-						Metrics: &egcfgv1a1.ProxyMetrics{
-							EnableVirtualHostStats: true,
-						},
-					},
+			name: "rate",
+			tracing: &egv1a1.ProxyTracing{
+				SamplingRate: ptr.To[uint32](10),
+			},
+			expected: 10.0,
+		},
+		{
+			name: "fraction numerator only",
+			tracing: &egv1a1.ProxyTracing{
+				SamplingFraction: &gwapiv1.Fraction{
+					Numerator: 100,
 				},
 			},
-			expected: &ir.Metrics{
-				EnableVirtualHostStats: true,
+			expected: 1.0,
+		},
+		{
+			name: "fraction",
+			tracing: &egv1a1.ProxyTracing{
+				SamplingFraction: &gwapiv1.Fraction{
+					Numerator:   1,
+					Denominator: ptr.To[int32](10),
+				},
 			},
+			expected: 0.1,
+		},
+		{
+			name: "less than zero",
+			tracing: &egv1a1.ProxyTracing{
+				SamplingFraction: &gwapiv1.Fraction{
+					Numerator:   1,
+					Denominator: ptr.To[int32](-1),
+				},
+			},
+			expected: 0,
+		},
+		{
+			name: "greater than 100",
+			tracing: &egv1a1.ProxyTracing{
+				SamplingFraction: &gwapiv1.Fraction{
+					Numerator:   101,
+					Denominator: ptr.To[int32](1),
+				},
+			},
+			expected: 100,
 		},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := processMetrics(c.proxy)
-			assert.Equal(t, c.expected, got)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := proxySamplingRate(tc.tracing)
+			if actual != tc.expected {
+				t.Errorf("expected %v, got %v", tc.expected, actual)
+			}
 		})
 	}
 }

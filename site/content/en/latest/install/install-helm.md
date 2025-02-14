@@ -10,7 +10,7 @@ Envoy Gateway can be installed via a Helm chart with a few simple steps, dependi
 ## Before you begin
 
 {{% alert title="Compatibility Matrix" color="warning" %}}
-Refer to the [Version Compatibility Matrix](/blog/2022/10/01/versions/) to learn more.
+Refer to the [Version Compatibility Matrix](/news/releases/matrix) to learn more.
 {{% /alert %}}
 
 The Envoy Gateway Helm chart is hosted by DockerHub.
@@ -28,13 +28,13 @@ You can visit [Envoy Gateway Helm Chart](https://hub.docker.com/r/envoyproxy/gat
 Envoy Gateway is typically deployed to Kubernetes from the command line. If you don't have Kubernetes, you should use `kind` to create one.
 
 {{% alert title="Developer Guide" color="primary" %}}
-Refer to the [Developer Guide](/latest/contributions/develop) to learn more.
+Refer to the [Developer Guide](../../contributions/develop) to learn more.
 {{% /alert %}}
 
 Install the Gateway API CRDs and Envoy Gateway:
 
 ```shell
-helm install eg oci://docker.io/envoyproxy/gateway-helm --version v0.0.0-latest -n envoy-gateway-system --create-namespace
+helm install eg oci://docker.io/envoyproxy/gateway-helm --version {{< helm-version >}} -n envoy-gateway-system --create-namespace
 ```
 
 Wait for Envoy Gateway to become available:
@@ -46,7 +46,7 @@ kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway --for
 Install the GatewayClass, Gateway, HTTPRoute and example app:
 
 ```shell
-kubectl apply -f https://github.com/envoyproxy/gateway/releases/download/latest/quickstart.yaml -n default
+kubectl apply -f https://github.com/envoyproxy/gateway/releases/download/{{< yaml-version >}}/quickstart.yaml -n default
 ```
 
 **Note**: [`quickstart.yaml`] defines that Envoy Gateway will listen for
@@ -57,16 +57,26 @@ unprivileged port, so that Envoy Gateway doesn't need additional privileges.
 It's important to be aware of this mapping, since you may need to take it into
 consideration when debugging.
 
-[`quickstart.yaml`]: https://github.com/envoyproxy/gateway/releases/download/latest/quickstart.yaml
+[`quickstart.yaml`]: https://github.com/envoyproxy/gateway/releases/download/{{< yaml-version >}}/quickstart.yaml
+
+## Upgrading from a previous version
+
+[Helm](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations) does not update CRDs
+that live in the `/crds` folder in the Helm Chart. So you will manually need to update the CRDs.
+Follow the steps outlined in [this](./install-yaml/#upgrading-from-v1.1) section if you're upgrading from a previous version.
 
 ## Helm chart customizations
 
-Some of the quick ways of using the helm install command for envoy gateway installation are below. 
+Some of the quick ways of using the helm install command for envoy gateway installation are below.
+
+{{% alert title="Helm Chart Values" color="primary" %}}
+If you want to know all the available fields inside the values.yaml file, please see the [Helm Chart Values](./gateway-helm-api).
+{{% /alert %}}
 
 ### Increase the replicas
 
 ```shell
-helm install eg oci://docker.io/envoyproxy/gateway-helm --version v0.0.0-latest -n envoy-gateway-system --create-namespace --set deployment.replicas=2
+helm install eg oci://docker.io/envoyproxy/gateway-helm --version {{< helm-version >}} -n envoy-gateway-system --create-namespace --set deployment.replicas=2
 ```
 
 ### Change the kubernetesClusterDomain name
@@ -74,7 +84,7 @@ helm install eg oci://docker.io/envoyproxy/gateway-helm --version v0.0.0-latest 
 If you have installed your cluster with different domain name you can use below command.
 
 ```shell
-helm install eg oci://docker.io/envoyproxy/gateway-helm --version v0.0.0-latest -n envoy-gateway-system --create-namespace --set kubernetesClusterDomain=<domain name>
+helm install eg oci://docker.io/envoyproxy/gateway-helm --version {{< helm-version >}} -n envoy-gateway-system --create-namespace --set kubernetesClusterDomain=<domain name>
 ```
 
 **Note**: Above are some of the ways we can directly use for customization of our installation. But if you are looking for more complex changes [values.yaml](https://helm.sh/docs/chart_template_guide/values_files/) comes to rescue.
@@ -111,12 +121,8 @@ Here we have made three changes to our values.yaml file. Increase the resources 
 You can use the below command to install the envoy gateway using values.yaml file.
 
 ```shell
-helm install eg oci://docker.io/envoyproxy/gateway-helm --version v0.0.0-latest -n envoy-gateway-system --create-namespace -f values.yaml
+helm install eg oci://docker.io/envoyproxy/gateway-helm --version {{< helm-version >}} -n envoy-gateway-system --create-namespace -f values.yaml
 ```
-
-{{% alert title="Helm Chart Values" color="primary" %}}
-If you want to know all the available fields inside the values.yaml file, please see the [Helm Chart Values](../api).
-{{% /alert %}}
 
 ## Open Ports
 
@@ -124,21 +130,23 @@ These are the ports used by Envoy Gateway and the managed Envoy Proxy.
 
 ### Envoy Gateway
 
-| Envoy Gateway          | Address   |  Port  |  Configurable  |
-|:----------------------:|:---------:|:------:|    :------:    |
-| Xds EnvoyProxy Server  | 0.0.0.0   | 18000  |       No       |
-| Xds RateLimit Server   | 0.0.0.0   | 18001  |       No       |
-| Admin Server           | 127.0.0.1 | 19000  |       Yes      |
-| Metrics Server         |  0.0.0.0  | 19001  |       No       |
-| Health Check           | 127.0.0.1 |  8081  |       No       |
+|     Envoy Gateway     |  Address  | Port  | Configurable |
+| :-------------------: | :-------: | :---: | :----------: |
+| Xds EnvoyProxy Server |  0.0.0.0  | 18000 |      No      |
+| Xds RateLimit Server  |  0.0.0.0  | 18001 |      No      |
+|     Admin Server      | 127.0.0.1 | 19000 |     Yes      |
+|    Metrics Server     |  0.0.0.0  | 19001 |      No      |
+|     Health Check      | 127.0.0.1 | 8081  |      No      |
 
 ### EnvoyProxy
 
-| Envoy Proxy                       | Address     | Port    |
-|:---------------------------------:|:-----------:| :-----: |
-| Admin Server                      | 127.0.0.1   | 19000   |
-| Heath Check  | 0.0.0.0     | 19001   |
+|   Envoy Proxy    |  Address  | Port  |
+| :--------------: | :-------: | :---: |
+|   Admin Server   | 127.0.0.1 | 19000 |
+|      Stats       |  0.0.0.0  | 19001 |
+| Shutdown Manager |  0.0.0.0  | 19002 |
+|    Readiness     |  0.0.0.0  | 19003 |
 
 {{% alert title="Next Steps" color="warning" %}}
-Envoy Gateway should now be successfully installed and running, but in order to experience more abilities of Envoy Gateway, you can refer to [User Guides](../../user).
+Envoy Gateway should now be successfully installed and running.  To experience more abilities of Envoy Gateway, refer to [Tasks](../tasks).
 {{% /alert %}}

@@ -5,20 +5,35 @@
 
 package v1alpha1
 
+import gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+// ProxyTracing defines the tracing configuration for a proxy.
+// +kubebuilder:validation:XValidation:message="only one of SamplingRate or SamplingFraction can be specified",rule="!(has(self.samplingRate) && has(self.samplingFraction))"
 type ProxyTracing struct {
 	// SamplingRate controls the rate at which traffic will be
 	// selected for tracing if no prior sampling decision has been made.
 	// Defaults to 100, valid values [0-100]. 100 indicates 100% sampling.
+	//
+	// Only one of SamplingRate or SamplingFraction may be specified.
+	// If neither field is specified, all requests will be sampled.
+	//
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=100
 	// +optional
 	SamplingRate *uint32 `json:"samplingRate,omitempty"`
+	// SamplingFraction represents the fraction of requests that should be
+	// selected for tracing if no prior sampling decision has been made.
+	//
+	// Only one of SamplingRate or SamplingFraction may be specified.
+	// If neither field is specified, all requests will be sampled.
+	//
+	// +optional
+	SamplingFraction *gwapiv1.Fraction `json:"samplingFraction,omitempty"`
 	// CustomTags defines the custom tags to add to each span.
 	// If provider is kubernetes, pod name and namespace are added by default.
 	CustomTags map[string]CustomTag `json:"customTags,omitempty"`
 	// Provider defines the tracing provider.
-	// Only OpenTelemetry is supported currently.
 	Provider TracingProvider `json:"provider"`
 }
 
@@ -26,22 +41,37 @@ type TracingProviderType string
 
 const (
 	TracingProviderTypeOpenTelemetry TracingProviderType = "OpenTelemetry"
+	TracingProviderTypeZipkin        TracingProviderType = "Zipkin"
+	TracingProviderTypeDatadog       TracingProviderType = "Datadog"
 )
 
+// TracingProvider defines the tracing provider configuration.
+//
+// +kubebuilder:validation:XValidation:message="host or backendRefs needs to be set",rule="has(self.host) || self.backendRefs.size() > 0"
+// +kubebuilder:validation:XValidation:message="BackendRefs must be used, backendRef is not supported.",rule="!has(self.backendRef)"
+// +kubebuilder:validation:XValidation:message="only supports Service kind.",rule="has(self.backendRefs) ? self.backendRefs.all(f, f.kind == 'Service') : true"
+// +kubebuilder:validation:XValidation:message="BackendRefs only supports Core group.",rule="has(self.backendRefs) ? (self.backendRefs.all(f, f.group == \"\")) : true"
 type TracingProvider struct {
+	BackendCluster `json:",inline"`
 	// Type defines the tracing provider type.
-	// EG currently only supports OpenTelemetry.
-	// +kubebuilder:validation:Enum=OpenTelemetry
+	// +kubebuilder:validation:Enum=OpenTelemetry;Zipkin;Datadog
 	// +kubebuilder:default=OpenTelemetry
 	Type TracingProviderType `json:"type"`
 	// Host define the provider service hostname.
-	Host string `json:"host"`
+	// Deprecated: Use BackendRefs instead.
+	//
+	// +optional
+	Host *string `json:"host,omitempty"`
 	// Port defines the port the provider service is exposed on.
+	// Deprecated: Use BackendRefs instead.
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=4317
 	Port int32 `json:"port,omitempty"`
+	// Zipkin defines the Zipkin tracing provider configuration
+	// +optional
+	Zipkin *ZipkinTracingProvider `json:"zipkin,omitempty"`
 }
 
 type CustomTagType string
@@ -97,4 +127,17 @@ type RequestHeaderCustomTag struct {
 	// DefaultValue defines the default value to use if the request header is not set.
 	// +optional
 	DefaultValue *string `json:"defaultValue,omitempty"`
+}
+
+// ZipkinTracingProvider defines the Zipkin tracing provider configuration.
+type ZipkinTracingProvider struct {
+	// Enable128BitTraceID determines whether a 128bit trace id will be used
+	// when creating a new trace instance. If set to false, a 64bit trace
+	// id will be used.
+	// +optional
+	Enable128BitTraceID *bool `json:"enable128BitTraceId,omitempty"`
+	// DisableSharedSpanContext determines whether the default Envoy behaviour of
+	// client and server spans sharing the same span context should be disabled.
+	// +optional
+	DisableSharedSpanContext *bool `json:"disableSharedSpanContext,omitempty"`
 }
