@@ -62,6 +62,8 @@ httpRoutes:
       backendRefs:
       - name: service-1
         port: 8080
+      timeouts:
+        request: 1s
 backendTrafficPolicies:
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: BackendTrafficPolicy
@@ -73,13 +75,13 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: Gateway
       name: gateway-1
-      namespace: envoy-gateway
     timeout:
       tcp:
         connectTimeout: 15s
       http:
         connectionIdleTimeout: 16s
         maxConnectionDuration: 17s
+        requestTimeout: 18s
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: BackendTrafficPolicy
   metadata:
@@ -90,10 +92,10 @@ backendTrafficPolicies:
       group: gateway.networking.k8s.io
       kind: HTTPRoute
       name: httproute-1
-      namespace: default
     timeout:
       tcp:
         connectTimeout: 20s
       http:
         connectionIdleTimeout: 21s
         maxConnectionDuration: 22s
+        requestTimeout: 23s

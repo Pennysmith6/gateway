@@ -10,17 +10,20 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"math"
+	"net"
+	"strconv"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-
+	"google.golang.org/grpc/test/bufconn"
 	corev1 "k8s.io/api/core/v1"
 	k8scli "sigs.k8s.io/controller-runtime/pkg/client"
 	k8sclicfg "sigs.k8s.io/controller-runtime/pkg/client/config"
-	v1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/envoyproxy/gateway/api/v1alpha1"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/envoygateway"
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
 	extTypes "github.com/envoyproxy/gateway/internal/extension/types"
@@ -46,7 +49,7 @@ var _ extTypes.Manager = (*Manager)(nil)
 type Manager struct {
 	k8sClient          k8scli.Client
 	namespace          string
-	extension          v1alpha1.ExtensionManager
+	extension          egv1a1.ExtensionManager
 	extensionConnCache *grpc.ClientConn
 }
 
@@ -57,14 +60,14 @@ func NewManager(cfg *config.Server) (extTypes.Manager, error) {
 		return nil, err
 	}
 
-	var extension *v1alpha1.ExtensionManager
+	var extension *egv1a1.ExtensionManager
 	if cfg.EnvoyGateway != nil {
 		extension = cfg.EnvoyGateway.ExtensionManager
 	}
 
 	// Setup an empty default in the case that no config was provided
 	if extension == nil {
-		extension = &v1alpha1.ExtensionManager{}
+		extension = &egv1a1.ExtensionManager{}
 	}
 
 	return &Manager{
@@ -74,32 +77,83 @@ func NewManager(cfg *config.Server) (extTypes.Manager, error) {
 	}, nil
 }
 
+func NewInMemoryManager(cfg egv1a1.ExtensionManager, server extension.EnvoyGatewayExtensionServer) (extTypes.Manager, func(), error) {
+	if server == nil {
+		return nil, nil, fmt.Errorf("in-memory manager must be passed a server")
+	}
+
+	buffer := 10 * 1024 * 1024
+	lis := bufconn.Listen(buffer)
+
+	baseServer := grpc.NewServer()
+	extension.RegisterEnvoyGatewayExtensionServer(baseServer, server)
+	go func() {
+		_ = baseServer.Serve(lis)
+	}()
+	conn, err := grpc.DialContext(context.Background(), "",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return lis.Dial()
+		}), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, err
+	}
+	c := func() {
+		lis.Close()
+		baseServer.Stop()
+	}
+
+	return &Manager{
+		extensionConnCache: conn,
+		extension:          cfg,
+	}, c, nil
+}
+
+// FailOpen returns true if the extension manager is configured to fail open, and false otherwise.
+func (m *Manager) FailOpen() bool {
+	return m.extension.FailOpen
+}
+
 // HasExtension checks to see whether a given Group and Kind has an
 // associated extension registered for it.
-func (m *Manager) HasExtension(g v1.Group, k v1.Kind) bool {
+func (m *Manager) HasExtension(g gwapiv1.Group, k gwapiv1.Kind) bool {
 	extension := m.extension
 	// TODO: not currently checking the version since extensionRef only supports group and kind.
 	for _, gvk := range extension.Resources {
-		if g == v1.Group(gvk.Group) && k == v1.Kind(gvk.Kind) {
+		if g == gwapiv1.Group(gvk.Group) && k == gwapiv1.Kind(gvk.Kind) {
 			return true
 		}
 	}
 	return false
 }
 
+func getExtensionServerAddress(service *egv1a1.ExtensionService) string {
+	var serverAddr string
+	switch {
+	case service.FQDN != nil:
+		serverAddr = net.JoinHostPort(service.FQDN.Hostname, strconv.Itoa(int(service.FQDN.Port)))
+	case service.IP != nil:
+		serverAddr = net.JoinHostPort(service.IP.Address, strconv.Itoa(int(service.IP.Port)))
+	case service.Unix != nil:
+		serverAddr = fmt.Sprintf("unix://%s", service.Unix.Path)
+	case service.Host != "":
+		serverAddr = net.JoinHostPort(service.Host, strconv.Itoa(int(service.Port)))
+	}
+	return serverAddr
+}
+
 // GetPreXDSHookClient checks if the registered extension makes use of a particular hook type that modifies inputs
 // that are used to generate an xDS resource.
 // If the extension makes use of the hook then the XDS Hook Client is returned. If it does not support
 // the hook type then nil is returned
-func (m *Manager) GetPreXDSHookClient(xdsHookType v1alpha1.XDSTranslatorHook) extTypes.XDSHookClient {
+func (m *Manager) GetPreXDSHookClient(xdsHookType egv1a1.XDSTranslatorHook) (extTypes.XDSHookClient, error) {
 	ctx := context.Background()
 	ext := m.extension
 
 	if ext.Hooks == nil {
-		return nil
+		return nil, nil
 	}
 	if ext.Hooks.XDSTranslator == nil {
-		return nil
+		return nil, nil
 	}
 
 	hookUsed := false
@@ -110,20 +164,20 @@ func (m *Manager) GetPreXDSHookClient(xdsHookType v1alpha1.XDSTranslatorHook) ex
 		}
 	}
 	if !hookUsed {
-		return nil
+		return nil, nil
 	}
 
 	if m.extensionConnCache == nil {
-		serverAddr := fmt.Sprintf("%s:%d", ext.Service.Host, ext.Service.Port)
+		serverAddr := getExtensionServerAddress(ext.Service)
 
 		opts, err := setupGRPCOpts(ctx, m.k8sClient, &ext, m.namespace)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 
 		conn, err := grpc.Dial(serverAddr, opts...)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 
 		m.extensionConnCache = conn
@@ -133,22 +187,22 @@ func (m *Manager) GetPreXDSHookClient(xdsHookType v1alpha1.XDSTranslatorHook) ex
 	xdsHookClient := &XDSHook{
 		grpcClient: client,
 	}
-	return xdsHookClient
+	return xdsHookClient, nil
 }
 
 // GetPostXDSHookClient checks if the registered extension makes use of a particular hook type that modifies
 // xDS resources after they are generated by Envoy Gateway.
 // If the extension makes use of the hook then the XDS Hook Client is returned. If it does not support
 // the hook type then nil is returned
-func (m *Manager) GetPostXDSHookClient(xdsHookType v1alpha1.XDSTranslatorHook) extTypes.XDSHookClient {
+func (m *Manager) GetPostXDSHookClient(xdsHookType egv1a1.XDSTranslatorHook) (extTypes.XDSHookClient, error) {
 	ctx := context.Background()
 	ext := m.extension
 
 	if ext.Hooks == nil {
-		return nil
+		return nil, nil
 	}
 	if ext.Hooks.XDSTranslator == nil {
-		return nil
+		return nil, nil
 	}
 
 	hookUsed := false
@@ -159,20 +213,20 @@ func (m *Manager) GetPostXDSHookClient(xdsHookType v1alpha1.XDSTranslatorHook) e
 		}
 	}
 	if !hookUsed {
-		return nil
+		return nil, nil
 	}
 
 	if m.extensionConnCache == nil {
-		serverAddr := fmt.Sprintf("%s:%d", ext.Service.Host, ext.Service.Port)
+		serverAddr := getExtensionServerAddress(ext.Service)
 
 		opts, err := setupGRPCOpts(ctx, m.k8sClient, &ext, m.namespace)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 
 		conn, err := grpc.Dial(serverAddr, opts...)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 
 		m.extensionConnCache = conn
@@ -182,7 +236,7 @@ func (m *Manager) GetPostXDSHookClient(xdsHookType v1alpha1.XDSTranslatorHook) e
 	xdsHookClient := &XDSHook{
 		grpcClient: client,
 	}
-	return xdsHookClient
+	return xdsHookClient, nil
 }
 
 func (m *Manager) CleanupHookConns() {
@@ -203,7 +257,7 @@ func parseCA(caSecret *corev1.Secret) (*x509.CertPool, error) {
 	return cp, nil
 }
 
-func setupGRPCOpts(ctx context.Context, client k8scli.Client, ext *v1alpha1.ExtensionManager, namespace string) ([]grpc.DialOption, error) {
+func setupGRPCOpts(ctx context.Context, client k8scli.Client, ext *egv1a1.ExtensionManager, namespace string) ([]grpc.DialOption, error) {
 	// These two errors shouldn't happen since we check these conditions when loading the extension
 	if ext == nil {
 		return nil, errors.New("the registered extension's config is nil")
@@ -232,5 +286,17 @@ func setupGRPCOpts(ctx context.Context, client k8scli.Client, ext *v1alpha1.Exte
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 	opts = append(opts, grpc.WithDefaultServiceConfig(grpcServiceConfig))
+	if ext.MaxMessageSize != nil {
+		maxMessageSize, ok := ext.MaxMessageSize.AsInt64()
+		if !ok {
+			return nil, fmt.Errorf("invalid Extension Manager MaxMessageSize value %s", ext.MaxMessageSize.String())
+		}
+		if maxMessageSize < 1 || maxMessageSize > math.MaxInt {
+			return nil, fmt.Errorf("extension Manager MaxMessageSize value %s is out of range, must be between 1 and %d",
+				ext.MaxMessageSize.String(), math.MaxInt)
+		}
+		opts = append(opts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(int(maxMessageSize)), grpc.MaxCallSendMsgSize(int(maxMessageSize))))
+	}
+
 	return opts, nil
 }

@@ -1,4 +1,5 @@
 gatewayClass:
+  kind: GatewayClass
   metadata:
     creationTimestamp: null
     name: eg
@@ -13,14 +14,18 @@ gatewayClass:
       status: "True"
       type: Accepted
 gateways:
-- metadata:
+- kind: Gateway
+  metadata:
     creationTimestamp: null
     name: eg
     namespace: envoy-gateway-system
   spec:
     gatewayClassName: eg
     listeners:
-    - name: http
+    - allowedRoutes:
+        namespaces:
+          from: Same
+      name: http
       port: 80
       protocol: HTTP
   status:
@@ -58,7 +63,9 @@ httpRoutes:
     hostnames:
     - www.example.com
     parentRefs:
-    - name: eg
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: eg
     rules:
     - backendRefs:
       - group: ""
@@ -85,6 +92,8 @@ httpRoutes:
         type: ResolvedRefs
       controllerName: gateway.envoyproxy.io/gatewayclass-controller
       parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
         name: eg
 xds:
   envoy-gateway-system/eg:
@@ -92,17 +101,20 @@ xds:
     dynamicActiveClusters:
     - cluster:
         '@type': type.googleapis.com/envoy.config.cluster.v3.Cluster
+        circuitBreakers:
+          thresholds:
+          - maxRetries: 1024
         commonLbConfig:
           localityWeightedLbConfig: {}
         connectTimeout: 10s
-        dnsLookupFamily: V4_ONLY
+        dnsLookupFamily: V4_PREFERRED
         edsClusterConfig:
           edsConfig:
             ads: {}
             resourceApiVersion: V3
           serviceName: httproute/envoy-gateway-system/backend/rule/0
+        ignoreHealthOnHostRemoval: true
         lbPolicy: LEAST_REQUEST
         name: httproute/envoy-gateway-system/backend/rule/0
-        outlierDetection: {}
         perConnectionBufferLimitBytes: 32768
         type: EDS

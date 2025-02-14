@@ -1,35 +1,44 @@
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
       resourceApiVersion: V3
     serviceName: first-route-dest
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: first-route-dest
-  outlierDetection: {}
   perConnectionBufferLimitBytes: 32768
   type: EDS
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   edsClusterConfig:
     edsConfig:
       ads: {}
       resourceApiVersion: V3
     serviceName: second-route-dest
+  ignoreHealthOnHostRemoval: true
   lbPolicy: LEAST_REQUEST
   name: second-route-dest
-  outlierDetection: {}
   perConnectionBufferLimitBytes: 32768
   type: EDS
-- commonLbConfig:
+- circuitBreakers:
+    thresholds:
+    - maxRetries: 1024
+  commonLbConfig:
     localityWeightedLbConfig: {}
   connectTimeout: 10s
-  dnsLookupFamily: V4_ONLY
+  dnsLookupFamily: V4_PREFERRED
   dnsRefreshRate: 30s
   lbPolicy: LEAST_REQUEST
   loadAssignment:
@@ -46,7 +55,6 @@
       locality:
         region: localhost_443/backend/0
   name: localhost_443
-  outlierDetection: {}
   perConnectionBufferLimitBytes: 32768
   respectDnsTtl: true
   transportSocket:

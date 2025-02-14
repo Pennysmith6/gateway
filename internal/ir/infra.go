@@ -7,6 +7,7 @@ package ir
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -15,7 +16,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"sigs.k8s.io/yaml"
 
-	"github.com/envoyproxy/gateway/api/v1alpha1"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 )
 
 const (
@@ -29,9 +30,14 @@ type Infra struct {
 	Proxy *ProxyInfra `json:"proxy" yaml:"proxy"`
 }
 
-func (i Infra) YAMLString() string {
-	y, _ := yaml.Marshal(&i)
+func (i *Infra) YAMLString() string {
+	y, _ := yaml.Marshal(i)
 	return string(y)
+}
+
+func (i *Infra) JSONString() string {
+	j, _ := json.Marshal(i)
+	return string(j)
 }
 
 // ProxyInfra defines managed proxy infrastructure.
@@ -42,7 +48,7 @@ type ProxyInfra struct {
 	// Name is the name used for managed proxy infrastructure.
 	Name string `json:"name" yaml:"name"`
 	// Config defines user-facing configuration of the managed proxy infrastructure.
-	Config *v1alpha1.EnvoyProxy `json:"config,omitempty" yaml:"config,omitempty"`
+	Config *egv1a1.EnvoyProxy `json:"config,omitempty" yaml:"config,omitempty"`
 	// Listeners define the listeners exposed by the proxy infrastructure.
 	Listeners []*ProxyListener `json:"listeners,omitempty" yaml:"listeners,omitempty"`
 	// Addresses contain the external addresses this gateway has been
@@ -77,6 +83,7 @@ type ProxyListener struct {
 
 // HTTP3Settings provides HTTP/3 configuration on the listener.
 type HTTP3Settings struct {
+	QUICPort int32 `json:"quicPort" yaml:"quicPort"`
 }
 
 // ListenerPort defines a network port of a listener.
@@ -175,9 +182,9 @@ func (p *ProxyInfra) GetProxyMetadata() *InfraMetadata {
 }
 
 // GetProxyConfig returns the ProxyInfra config.
-func (p *ProxyInfra) GetProxyConfig() *v1alpha1.EnvoyProxy {
+func (p *ProxyInfra) GetProxyConfig() *egv1a1.EnvoyProxy {
 	if p.Config == nil {
-		p.Config = new(v1alpha1.EnvoyProxy)
+		p.Config = new(egv1a1.EnvoyProxy)
 	}
 
 	return p.Config
@@ -221,8 +228,8 @@ func (p *ProxyInfra) Validate() error {
 				if listener.Ports[j].ServicePort < 1 || listener.Ports[j].ServicePort > 65353 {
 					errs = append(errs, errors.New("listener service port must be a valid port number"))
 				}
-				if listener.Ports[j].ContainerPort < 1024 || listener.Ports[j].ContainerPort > 65353 {
-					errs = append(errs, errors.New("listener container port must be a valid ephemeral port number"))
+				if listener.Ports[j].ContainerPort < 1 || listener.Ports[j].ContainerPort > 65353 {
+					errs = append(errs, errors.New("listener container port must be a valid port number"))
 				}
 			}
 		}

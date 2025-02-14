@@ -43,6 +43,7 @@ apiGroups:
 - apps
 resources:
 - deployments
+- daemonsets
 verbs:
 - get
 - list
@@ -69,6 +70,9 @@ resources:
 - clienttrafficpolicies
 - backendtrafficpolicies
 - securitypolicies
+- envoyextensionpolicies
+- backends
+- httproutefilters
 verbs:
 - get
 - list
@@ -83,6 +87,8 @@ resources:
 - clienttrafficpolicies/status
 - backendtrafficpolicies/status
 - securitypolicies/status
+- envoyextensionpolicies/status
+- backends/status
 verbs:
 - update
 {{- end }}
@@ -98,6 +104,7 @@ resources:
 - tcproutes
 - tlsroutes
 - udproutes
+- backendtlspolicies
 verbs:
 - get
 - list
@@ -114,6 +121,7 @@ resources:
 - tcproutes/status
 - tlsroutes/status
 - udproutes/status
+- backendtlspolicies/status
 verbs:
 - update
 {{- end }}

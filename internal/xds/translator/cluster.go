@@ -21,12 +21,16 @@ import (
 	xdstype "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"github.com/golang/protobuf/ptypes/wrappers"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	"k8s.io/utils/ptr"
 
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/utils/protocov"
 )
 
 const (
@@ -37,17 +41,23 @@ const (
 )
 
 type xdsClusterArgs struct {
-	name           string
-	settings       []*ir.DestinationSetting
-	tSocket        *corev3.TransportSocket
-	endpointType   EndpointType
-	loadBalancer   *ir.LoadBalancer
-	proxyProtocol  *ir.ProxyProtocol
-	circuitBreaker *ir.CircuitBreaker
-	healthCheck    *ir.HealthCheck
-	http1Settings  *ir.HTTP1Settings
-	timeout        *ir.Timeout
-	tcpkeepalive   *ir.TCPKeepalive
+	name              string
+	settings          []*ir.DestinationSetting
+	tSocket           *corev3.TransportSocket
+	endpointType      EndpointType
+	loadBalancer      *ir.LoadBalancer
+	proxyProtocol     *ir.ProxyProtocol
+	circuitBreaker    *ir.CircuitBreaker
+	healthCheck       *ir.HealthCheck
+	http1Settings     *ir.HTTP1Settings
+	http2Settings     *ir.HTTP2Settings
+	timeout           *ir.Timeout
+	tcpkeepalive      *ir.TCPKeepalive
+	metrics           *ir.Metrics
+	backendConnection *ir.BackendConnection
+	dns               *ir.DNS
+	useClientProtocol bool
+	ipFamily          *egv1a1.IPFamily
 }
 
 type EndpointType int
@@ -57,24 +67,98 @@ const (
 	EndpointTypeStatic
 )
 
+func buildEndpointType(settings []*ir.DestinationSetting) EndpointType {
+	// Get endpoint address type for xds cluster by returning the first DestinationSetting's AddressType,
+	// since there's no Mixed AddressType among all the DestinationSettings.
+	if settings == nil {
+		return EndpointTypeStatic
+	}
+
+	addrType := settings[0].AddressType
+
+	if addrType != nil && *addrType == ir.FQDN {
+		return EndpointTypeDNS
+	}
+
+	return EndpointTypeStatic
+}
+
 func buildXdsCluster(args *xdsClusterArgs) *clusterv3.Cluster {
+	dnsLookupFamily := clusterv3.Cluster_V4_PREFERRED
+	if args.ipFamily != nil {
+		switch *args.ipFamily {
+		case egv1a1.IPv4:
+			dnsLookupFamily = clusterv3.Cluster_V4_ONLY
+		case egv1a1.IPv6:
+			dnsLookupFamily = clusterv3.Cluster_V6_ONLY
+		case egv1a1.DualStack:
+			dnsLookupFamily = clusterv3.Cluster_ALL
+		}
+	}
+
 	cluster := &clusterv3.Cluster{
 		Name:            args.name,
-		DnsLookupFamily: clusterv3.Cluster_V4_ONLY,
+		DnsLookupFamily: dnsLookupFamily,
 		CommonLbConfig: &clusterv3.Cluster_CommonLbConfig{
 			LocalityConfigSpecifier: &clusterv3.Cluster_CommonLbConfig_LocalityWeightedLbConfig_{
-				LocalityWeightedLbConfig: &clusterv3.Cluster_CommonLbConfig_LocalityWeightedLbConfig{}}},
-		OutlierDetection:              &clusterv3.OutlierDetection{},
-		PerConnectionBufferLimitBytes: wrapperspb.UInt32(tcpClusterPerConnectionBufferLimitBytes),
+				LocalityWeightedLbConfig: &clusterv3.Cluster_CommonLbConfig_LocalityWeightedLbConfig{},
+			},
+		},
+		PerConnectionBufferLimitBytes: buildBackandConnectionBufferLimitBytes(args.backendConnection),
+	}
+
+	// 50% is the Envoy default value for panic threshold. No need to explicitly set it in this case.
+	if args.healthCheck != nil && args.healthCheck.PanicThreshold != nil && *args.healthCheck.PanicThreshold != 50 {
+		cluster.CommonLbConfig.HealthyPanicThreshold = &xdstype.Percent{
+			Value: float64(*args.healthCheck.PanicThreshold),
+		}
 	}
 
 	cluster.ConnectTimeout = buildConnectTimeout(args.timeout)
+
+	// Initialize TrackClusterStats if any metrics are enabled
+	if args.metrics != nil && (args.metrics.EnablePerEndpointStats || args.metrics.EnableRequestResponseSizesStats) {
+		cluster.TrackClusterStats = &clusterv3.TrackClusterStats{}
+
+		// Set per endpoint stats if enabled
+		if args.metrics.EnablePerEndpointStats {
+			cluster.TrackClusterStats.PerEndpointStats = args.metrics.EnablePerEndpointStats
+		}
+
+		// Set request response sizes stats if enabled
+		if args.metrics.EnableRequestResponseSizesStats {
+			cluster.TrackClusterStats.RequestResponseSizes = args.metrics.EnableRequestResponseSizesStats
+		}
+	}
 
 	// Set Proxy Protocol
 	if args.proxyProtocol != nil {
 		cluster.TransportSocket = buildProxyProtocolSocket(args.proxyProtocol, args.tSocket)
 	} else if args.tSocket != nil {
 		cluster.TransportSocket = args.tSocket
+	}
+
+	for i, ds := range args.settings {
+		if ds.TLS != nil {
+			socket, err := buildXdsUpstreamTLSSocketWthCert(ds.TLS)
+			if err != nil {
+				// TODO: Log something here
+				return nil
+			}
+			if args.proxyProtocol != nil {
+				socket = buildProxyProtocolSocket(args.proxyProtocol, socket)
+			}
+			matchName := fmt.Sprintf("%s/tls/%d", args.name, i)
+			cluster.TransportSocketMatches = append(cluster.TransportSocketMatches, &clusterv3.Cluster_TransportSocketMatch{
+				Name: matchName,
+				Match: &structpb.Struct{
+					Fields: map[string]*structpb.Value{
+						"name": structpb.NewStringValue(matchName),
+					},
+				},
+				TransportSocket: socket,
+			})
+		}
 	}
 
 	if args.endpointType == EndpointTypeStatic {
@@ -88,10 +172,23 @@ func buildXdsCluster(args *xdsClusterArgs) *clusterv3.Cluster {
 				},
 			},
 		}
+		// Dont wait for a health check to determine health and remove these endpoints
+		// if the endpoint has been removed via EDS by the control plane
+		cluster.IgnoreHealthOnHostRemoval = true
 	} else {
 		cluster.ClusterDiscoveryType = &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STRICT_DNS}
 		cluster.DnsRefreshRate = durationpb.New(30 * time.Second)
 		cluster.RespectDnsTtl = true
+		if args.dns != nil {
+			if args.dns.DNSRefreshRate != nil {
+				if args.dns.DNSRefreshRate.Duration > 0 {
+					cluster.DnsRefreshRate = durationpb.New(args.dns.DNSRefreshRate.Duration)
+				}
+			}
+			if args.dns.RespectDNSTTL != nil {
+				cluster.RespectDnsTtl = ptr.Deref(args.dns.RespectDNSTTL, true)
+			}
+		}
 	}
 
 	// build common, HTTP/1 and HTTP/2  protocol options for cluster
@@ -119,21 +216,27 @@ func buildXdsCluster(args *xdsClusterArgs) *clusterv3.Cluster {
 		}
 	} else if args.loadBalancer.RoundRobin != nil {
 		cluster.LbPolicy = clusterv3.Cluster_ROUND_ROBIN
-		if args.loadBalancer.RoundRobin.SlowStart != nil {
-			if args.loadBalancer.RoundRobin.SlowStart.Window != nil {
-				cluster.LbConfig = &clusterv3.Cluster_RoundRobinLbConfig_{
-					RoundRobinLbConfig: &clusterv3.Cluster_RoundRobinLbConfig{
-						SlowStartConfig: &clusterv3.Cluster_SlowStartConfig{
-							SlowStartWindow: durationpb.New(args.loadBalancer.RoundRobin.SlowStart.Window.Duration),
-						},
+		if args.loadBalancer.RoundRobin.SlowStart != nil && args.loadBalancer.RoundRobin.SlowStart.Window != nil {
+			cluster.LbConfig = &clusterv3.Cluster_RoundRobinLbConfig_{
+				RoundRobinLbConfig: &clusterv3.Cluster_RoundRobinLbConfig{
+					SlowStartConfig: &clusterv3.Cluster_SlowStartConfig{
+						SlowStartWindow: durationpb.New(args.loadBalancer.RoundRobin.SlowStart.Window.Duration),
 					},
-				}
+				},
 			}
 		}
 	} else if args.loadBalancer.Random != nil {
 		cluster.LbPolicy = clusterv3.Cluster_RANDOM
 	} else if args.loadBalancer.ConsistentHash != nil {
 		cluster.LbPolicy = clusterv3.Cluster_MAGLEV
+
+		if args.loadBalancer.ConsistentHash.TableSize != nil {
+			cluster.LbConfig = &clusterv3.Cluster_MaglevLbConfig_{
+				MaglevLbConfig: &clusterv3.Cluster_MaglevLbConfig{
+					TableSize: &wrapperspb.UInt64Value{Value: *args.loadBalancer.ConsistentHash.TableSize},
+				},
+			}
+		}
 	}
 
 	if args.healthCheck != nil && args.healthCheck.Active != nil {
@@ -142,11 +245,10 @@ func buildXdsCluster(args *xdsClusterArgs) *clusterv3.Cluster {
 
 	if args.healthCheck != nil && args.healthCheck.Passive != nil {
 		cluster.OutlierDetection = buildXdsOutlierDetection(args.healthCheck.Passive)
+	}
 
-	}
-	if args.circuitBreaker != nil {
-		cluster.CircuitBreakers = buildXdsClusterCircuitBreaker(args.circuitBreaker)
-	}
+	cluster.CircuitBreakers = buildXdsClusterCircuitBreaker(args.circuitBreaker)
+
 	if args.tcpkeepalive != nil {
 		cluster.UpstreamConnectionOptions = buildXdsClusterUpstreamOptions(args.tcpkeepalive)
 	}
@@ -164,8 +266,10 @@ func buildXdsHealthCheck(healthcheck *ir.ActiveHealthCheck) []*corev3.HealthChec
 	if healthcheck.HealthyThreshold != nil {
 		hc.HealthyThreshold = wrapperspb.UInt32(*healthcheck.HealthyThreshold)
 	}
-	if healthcheck.HTTP != nil {
+	switch {
+	case healthcheck.HTTP != nil:
 		httpChecker := &corev3.HealthCheck_HttpHealthCheck{
+			Host: healthcheck.HTTP.Host,
 			Path: healthcheck.HTTP.Path,
 		}
 		if healthcheck.HTTP.Method != nil {
@@ -178,8 +282,7 @@ func buildXdsHealthCheck(healthcheck *ir.ActiveHealthCheck) []*corev3.HealthChec
 		hc.HealthChecker = &corev3.HealthCheck_HttpHealthCheck_{
 			HttpHealthCheck: httpChecker,
 		}
-	}
-	if healthcheck.TCP != nil {
+	case healthcheck.TCP != nil:
 		tcpChecker := &corev3.HealthCheck_TcpHealthCheck{
 			Send: buildHealthCheckPayload(healthcheck.TCP.Send),
 		}
@@ -188,6 +291,12 @@ func buildXdsHealthCheck(healthcheck *ir.ActiveHealthCheck) []*corev3.HealthChec
 		}
 		hc.HealthChecker = &corev3.HealthCheck_TcpHealthCheck_{
 			TcpHealthCheck: tcpChecker,
+		}
+	case healthcheck.GRPC != nil:
+		hc.HealthChecker = &corev3.HealthCheck_GrpcHealthCheck_{
+			GrpcHealthCheck: &corev3.HealthCheck_GrpcHealthCheck{
+				ServiceName: ptr.Deref(healthcheck.GRPC.Service, ""),
+			},
 		}
 	}
 	return []*corev3.HealthCheck{hc}
@@ -272,25 +381,38 @@ func buildHealthCheckPayload(irLoad *ir.HealthCheckPayload) *corev3.HealthCheck_
 }
 
 func buildXdsClusterCircuitBreaker(circuitBreaker *ir.CircuitBreaker) *clusterv3.CircuitBreakers {
+	// Always allow the same amount of retries as regular requests to handle surges in retries
+	// related to pod restarts
 	cbt := &clusterv3.CircuitBreakers_Thresholds{
 		Priority: corev3.RoutingPriority_DEFAULT,
+		MaxRetries: &wrapperspb.UInt32Value{
+			Value: uint32(1024),
+		},
 	}
 
-	if circuitBreaker.MaxConnections != nil {
-		cbt.MaxConnections = &wrapperspb.UInt32Value{
-			Value: *circuitBreaker.MaxConnections,
+	if circuitBreaker != nil {
+		if circuitBreaker.MaxConnections != nil {
+			cbt.MaxConnections = &wrapperspb.UInt32Value{
+				Value: *circuitBreaker.MaxConnections,
+			}
 		}
-	}
 
-	if circuitBreaker.MaxPendingRequests != nil {
-		cbt.MaxPendingRequests = &wrapperspb.UInt32Value{
-			Value: *circuitBreaker.MaxPendingRequests,
+		if circuitBreaker.MaxPendingRequests != nil {
+			cbt.MaxPendingRequests = &wrapperspb.UInt32Value{
+				Value: *circuitBreaker.MaxPendingRequests,
+			}
 		}
-	}
 
-	if circuitBreaker.MaxParallelRequests != nil {
-		cbt.MaxRequests = &wrapperspb.UInt32Value{
-			Value: *circuitBreaker.MaxParallelRequests,
+		if circuitBreaker.MaxParallelRequests != nil {
+			cbt.MaxRequests = &wrapperspb.UInt32Value{
+				Value: *circuitBreaker.MaxParallelRequests,
+			}
+		}
+
+		if circuitBreaker.MaxParallelRetries != nil {
+			cbt.MaxRetries = &wrapperspb.UInt32Value{
+				Value: *circuitBreaker.MaxParallelRetries,
+			}
 		}
 	}
 
@@ -307,23 +429,32 @@ func buildXdsClusterLoadAssignment(clusterName string, destSettings []*ir.Destin
 
 		endpoints := make([]*endpointv3.LbEndpoint, 0, len(ds.Endpoints))
 
-		for _, irEp := range ds.Endpoints {
-			lbEndpoint := &endpointv3.LbEndpoint{
-				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
-					Endpoint: &endpointv3.Endpoint{
-						Address: &corev3.Address{
-							Address: &corev3.Address_SocketAddress{
-								SocketAddress: &corev3.SocketAddress{
-									Protocol: corev3.SocketAddress_TCP,
-									Address:  irEp.Host,
-									PortSpecifier: &corev3.SocketAddress_PortValue{
-										PortValue: irEp.Port,
-									},
-								},
-							},
+		var metadata *corev3.Metadata
+		if ds.TLS != nil {
+			metadata = &corev3.Metadata{
+				FilterMetadata: map[string]*structpb.Struct{
+					"envoy.transport_socket_match": {
+						Fields: map[string]*structpb.Value{
+							"name": structpb.NewStringValue(fmt.Sprintf("%s/tls/%d", clusterName, i)),
 						},
 					},
 				},
+			}
+		}
+
+		for _, irEp := range ds.Endpoints {
+			healthStatus := corev3.HealthStatus_UNKNOWN
+			if irEp.Draining {
+				healthStatus = corev3.HealthStatus_DRAINING
+			}
+			lbEndpoint := &endpointv3.LbEndpoint{
+				Metadata: metadata,
+				HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+					Endpoint: &endpointv3.Endpoint{
+						Address: buildAddress(irEp),
+					},
+				},
+				HealthStatus: healthStatus,
 			}
 			// Set default weight of 1 for all endpoints.
 			lbEndpoint.LoadBalancingWeight = &wrapperspb.UInt32Value{Value: 1}
@@ -349,7 +480,7 @@ func buildXdsClusterLoadAssignment(clusterName string, destSettings []*ir.Destin
 			weight = 1
 		}
 		locality.LoadBalancingWeight = &wrapperspb.UInt32Value{Value: weight}
-
+		locality.Priority = ptr.Deref(ds.Priority, 0)
 		localities = append(localities, locality)
 	}
 	return &endpointv3.ClusterLoadAssignment{ClusterName: clusterName, Endpoints: localities}
@@ -371,7 +502,7 @@ func buildTypedExtensionProtocolOptions(args *xdsClusterArgs) map[string]*anypb.
 
 	requiresHTTP1Options := args.http1Settings != nil && (args.http1Settings.EnableTrailers || args.http1Settings.PreserveHeaderCase || args.http1Settings.HTTP10 != nil)
 
-	if !(requiresCommonHTTPOptions || requiresHTTP1Options || requiresHTTP2Options) {
+	if !(requiresCommonHTTPOptions || requiresHTTP1Options || requiresHTTP2Options || args.useClientProtocol) {
 		return nil
 	}
 
@@ -382,13 +513,11 @@ func buildTypedExtensionProtocolOptions(args *xdsClusterArgs) map[string]*anypb.
 
 		if args.timeout != nil && args.timeout.HTTP != nil {
 			if args.timeout.HTTP.ConnectionIdleTimeout != nil {
-				protocolOptions.CommonHttpProtocolOptions.IdleTimeout =
-					durationpb.New(args.timeout.HTTP.ConnectionIdleTimeout.Duration)
+				protocolOptions.CommonHttpProtocolOptions.IdleTimeout = durationpb.New(args.timeout.HTTP.ConnectionIdleTimeout.Duration)
 			}
 
 			if args.timeout.HTTP.MaxConnectionDuration != nil {
-				protocolOptions.CommonHttpProtocolOptions.MaxConnectionDuration =
-					durationpb.New(args.timeout.HTTP.MaxConnectionDuration.Duration)
+				protocolOptions.CommonHttpProtocolOptions.MaxConnectionDuration = durationpb.New(args.timeout.HTTP.MaxConnectionDuration.Duration)
 			}
 		}
 
@@ -397,27 +526,13 @@ func buildTypedExtensionProtocolOptions(args *xdsClusterArgs) map[string]*anypb.
 				Value: *args.circuitBreaker.MaxRequestsPerConnection,
 			}
 		}
-
 	}
 
-	// When setting any Typed Extension Protocol Options, UpstreamProtocolOptions are mandatory
-	// If translation requires HTTP2 enablement or HTTP1 trailers, set appropriate setting
-	// Default to http1 otherwise
-	// TODO: If the cluster is TLS enabled, use AutoHTTPConfig instead of ExplicitHttpConfig
-	// so that when ALPN is supported then enabling http1 options doesn't force HTTP/1.1
-	switch {
-	case requiresHTTP2Options:
-		protocolOptions.UpstreamProtocolOptions = &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
-			ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
-				ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{},
-			},
-		}
-	case requiresHTTP1Options:
-		http1opts := &corev3.Http1ProtocolOptions{
-			EnableTrailers: args.http1Settings.EnableTrailers,
-		}
+	http1opts := &corev3.Http1ProtocolOptions{}
+	if args.http1Settings != nil {
+		http1opts.EnableTrailers = args.http1Settings.EnableTrailers
 		if args.http1Settings.PreserveHeaderCase {
-			preservecaseAny, _ := anypb.New(&preservecasev3.PreserveCaseFormatterConfig{})
+			preservecaseAny, _ := protocov.ToAnyWithValidation(&preservecasev3.PreserveCaseFormatterConfig{})
 			http1opts.HeaderKeyFormat = &corev3.Http1ProtocolOptions_HeaderKeyFormat{
 				HeaderFormat: &corev3.Http1ProtocolOptions_HeaderKeyFormat_StatefulFormatter{
 					StatefulFormatter: &corev3.TypedExtensionConfig{
@@ -431,6 +546,30 @@ func buildTypedExtensionProtocolOptions(args *xdsClusterArgs) map[string]*anypb.
 			http1opts.AcceptHttp_10 = true
 			http1opts.DefaultHostForHttp_10 = ptr.Deref(args.http1Settings.HTTP10.DefaultHost, "")
 		}
+	}
+
+	// When setting any Typed Extension Protocol Options, UpstreamProtocolOptions are mandatory
+	// If translation requires HTTP2 enablement or HTTP1 trailers, set appropriate setting
+	// Default to http1 otherwise
+	// TODO: If the cluster is TLS enabled, use AutoHTTPConfig instead of ExplicitHttpConfig
+	// so that when ALPN is supported then enabling http1 options doesn't force HTTP/1.1
+	switch {
+	case args.useClientProtocol:
+		protocolOptions.UpstreamProtocolOptions = &httpv3.HttpProtocolOptions_UseDownstreamProtocolConfig{
+			UseDownstreamProtocolConfig: &httpv3.HttpProtocolOptions_UseDownstreamHttpConfig{
+				HttpProtocolOptions:  http1opts,
+				Http2ProtocolOptions: buildHTTP2Settings(args.http2Settings),
+			},
+		}
+	case requiresHTTP2Options:
+		protocolOptions.UpstreamProtocolOptions = &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
+			ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
+				ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+					Http2ProtocolOptions: buildHTTP2Settings(args.http2Settings),
+				},
+			},
+		}
+	case requiresHTTP1Options:
 		protocolOptions.UpstreamProtocolOptions = &httpv3.HttpProtocolOptions_ExplicitHttpConfig_{
 			ExplicitHttpConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig{
 				ProtocolConfig: &httpv3.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{
@@ -446,20 +585,13 @@ func buildTypedExtensionProtocolOptions(args *xdsClusterArgs) map[string]*anypb.
 		}
 	}
 
-	anyProtocolOptions, _ := anypb.New(&protocolOptions)
+	anyProtocolOptions, _ := protocov.ToAnyWithValidation(&protocolOptions)
 
 	extensionOptions := map[string]*anypb.Any{
 		extensionOptionsKey: anyProtocolOptions,
 	}
 
 	return extensionOptions
-}
-
-// buildClusterName returns a cluster name for the given `host` and `port`.
-// The format is: <type>|<host>|<port>, where type is "accesslog" for access logs.
-// It's easy to distinguish when debugging.
-func buildClusterName(prefix string, host string, port uint32) string {
-	return fmt.Sprintf("%s|%s|%d", prefix, host, port)
 }
 
 // buildProxyProtocolSocket builds the ProxyProtocol transport socket.
@@ -484,7 +616,7 @@ func buildProxyProtocolSocket(proxyProtocol *ir.ProxyProtocol, tSocket *corev3.T
 	// If existing transport socket does not exist wrap around raw buffer
 	if tSocket == nil {
 		rawCtx := &rawbufferv3.RawBuffer{}
-		rawCtxAny, err := anypb.New(rawCtx)
+		rawCtxAny, err := protocov.ToAnyWithValidation(rawCtx)
 		if err != nil {
 			return nil
 		}
@@ -499,7 +631,7 @@ func buildProxyProtocolSocket(proxyProtocol *ir.ProxyProtocol, tSocket *corev3.T
 		ppCtx.TransportSocket = tSocket
 	}
 
-	ppCtxAny, err := anypb.New(ppCtx)
+	ppCtxAny, err := protocov.ToAnyWithValidation(ppCtx)
 	if err != nil {
 		return nil
 	}
@@ -532,7 +664,7 @@ func buildXdsClusterUpstreamOptions(tcpkeepalive *ir.TCPKeepalive) *clusterv3.Up
 		ka.TcpKeepalive.KeepaliveProbes = wrapperspb.UInt32(*tcpkeepalive.Probes)
 	}
 
-	if tcpkeepalive.Probes != nil {
+	if tcpkeepalive.IdleTime != nil {
 		ka.TcpKeepalive.KeepaliveTime = wrapperspb.UInt32(*tcpkeepalive.IdleTime)
 	}
 
@@ -541,5 +673,147 @@ func buildXdsClusterUpstreamOptions(tcpkeepalive *ir.TCPKeepalive) *clusterv3.Up
 	}
 
 	return ka
+}
 
+func buildAddress(irEp *ir.DestinationEndpoint) *corev3.Address {
+	if irEp.Path != nil {
+		return &corev3.Address{
+			Address: &corev3.Address_Pipe{
+				Pipe: &corev3.Pipe{
+					Path: *irEp.Path,
+				},
+			},
+		}
+	}
+	return &corev3.Address{
+		Address: &corev3.Address_SocketAddress{
+			SocketAddress: &corev3.SocketAddress{
+				Protocol: corev3.SocketAddress_TCP,
+				Address:  irEp.Host,
+				PortSpecifier: &corev3.SocketAddress_PortValue{
+					PortValue: irEp.Port,
+				},
+			},
+		},
+	}
+}
+
+func buildBackandConnectionBufferLimitBytes(bc *ir.BackendConnection) *wrappers.UInt32Value {
+	if bc != nil && bc.BufferLimitBytes != nil {
+		return wrapperspb.UInt32(*bc.BufferLimitBytes)
+	}
+
+	return wrapperspb.UInt32(tcpClusterPerConnectionBufferLimitBytes)
+}
+
+type ExtraArgs struct {
+	metrics       *ir.Metrics
+	http1Settings *ir.HTTP1Settings
+	http2Settings *ir.HTTP2Settings
+	ipFamily      *egv1a1.IPFamily
+}
+
+type clusterArgs interface {
+	asClusterArgs(extras *ExtraArgs) *xdsClusterArgs
+}
+
+type UDPRouteTranslator struct {
+	*ir.UDPRoute
+}
+
+func (route *UDPRouteTranslator) asClusterArgs(extra *ExtraArgs) *xdsClusterArgs {
+	return &xdsClusterArgs{
+		name:         route.Destination.Name,
+		settings:     route.Destination.Settings,
+		loadBalancer: route.LoadBalancer,
+		endpointType: buildEndpointType(route.Destination.Settings),
+		metrics:      extra.metrics,
+		dns:          route.DNS,
+		ipFamily:     extra.ipFamily,
+	}
+}
+
+type TCPRouteTranslator struct {
+	*ir.TCPRoute
+}
+
+func (route *TCPRouteTranslator) asClusterArgs(extra *ExtraArgs) *xdsClusterArgs {
+	return &xdsClusterArgs{
+		name:              route.Destination.Name,
+		settings:          route.Destination.Settings,
+		loadBalancer:      route.LoadBalancer,
+		proxyProtocol:     route.ProxyProtocol,
+		circuitBreaker:    route.CircuitBreaker,
+		tcpkeepalive:      route.TCPKeepalive,
+		healthCheck:       route.HealthCheck,
+		timeout:           route.Timeout,
+		endpointType:      buildEndpointType(route.Destination.Settings),
+		metrics:           extra.metrics,
+		backendConnection: route.BackendConnection,
+		dns:               route.DNS,
+		ipFamily:          extra.ipFamily,
+	}
+}
+
+type HTTPRouteTranslator struct {
+	*ir.HTTPRoute
+}
+
+func (httpRoute *HTTPRouteTranslator) asClusterArgs(extra *ExtraArgs) *xdsClusterArgs {
+	clusterArgs := &xdsClusterArgs{
+		name:              httpRoute.Destination.Name,
+		settings:          httpRoute.Destination.Settings,
+		tSocket:           nil,
+		endpointType:      buildEndpointType(httpRoute.Destination.Settings),
+		metrics:           extra.metrics,
+		http1Settings:     extra.http1Settings,
+		http2Settings:     extra.http2Settings,
+		useClientProtocol: ptr.Deref(httpRoute.UseClientProtocol, false),
+		ipFamily:          extra.ipFamily,
+	}
+
+	// Populate traffic features.
+	bt := httpRoute.Traffic
+	if bt != nil {
+		clusterArgs.loadBalancer = bt.LoadBalancer
+		clusterArgs.proxyProtocol = bt.ProxyProtocol
+		clusterArgs.circuitBreaker = bt.CircuitBreaker
+		clusterArgs.healthCheck = bt.HealthCheck
+		clusterArgs.timeout = bt.Timeout
+		clusterArgs.tcpkeepalive = bt.TCPKeepalive
+		clusterArgs.backendConnection = bt.BackendConnection
+		clusterArgs.dns = bt.DNS
+	}
+
+	return clusterArgs
+}
+
+func buildHTTP2Settings(opts *ir.HTTP2Settings) *corev3.Http2ProtocolOptions {
+	if opts == nil {
+		opts = &ir.HTTP2Settings{}
+	}
+
+	// defaults based on https://www.envoyproxy.io/docs/envoy/latest/configuration/best_practices/edge
+	out := &corev3.Http2ProtocolOptions{
+		InitialStreamWindowSize: &wrapperspb.UInt32Value{
+			Value: ptr.Deref(opts.InitialStreamWindowSize, http2InitialStreamWindowSize),
+		},
+		InitialConnectionWindowSize: &wrapperspb.UInt32Value{
+			Value: ptr.Deref(opts.InitialConnectionWindowSize, http2InitialConnectionWindowSize),
+		},
+	}
+
+	if opts.MaxConcurrentStreams != nil {
+		out.MaxConcurrentStreams = &wrapperspb.UInt32Value{
+			Value: *opts.MaxConcurrentStreams,
+		}
+	}
+
+	if opts.ResetStreamOnError != nil {
+		out.OverrideStreamErrorOnInvalidHttpMessage = &wrapperspb.BoolValue{
+			Value: *opts.ResetStreamOnError,
+		}
+	}
+
+	return out
 }

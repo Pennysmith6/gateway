@@ -10,16 +10,19 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/envoyproxy/gateway/api/v1alpha1"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
+	"github.com/envoyproxy/gateway/internal/logging"
 )
 
 func TestInitAdminServer(t *testing.T) {
 	svrConfig := &config.Server{
-		EnvoyGateway: &v1alpha1.EnvoyGateway{
-			EnvoyGatewaySpec: v1alpha1.EnvoyGatewaySpec{},
+		EnvoyGateway: &egv1a1.EnvoyGateway{
+			EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{},
 		},
 	}
+
+	svrConfig.Logger = logging.NewLogger(egv1a1.DefaultEnvoyGatewayLogging())
 	err := Init(svrConfig)
 	require.NoError(t, err)
 }

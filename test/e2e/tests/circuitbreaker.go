@@ -4,7 +4,6 @@
 // the root of the repo.
 
 //go:build e2e
-// +build e2e
 
 package tests
 
@@ -45,15 +44,7 @@ var CircuitBreakerTest = suite.ConformanceTest{
 				Namespace: ns,
 			}
 
-			req := http.MakeRequest(t, &expectedResponse, gwAddr, "HTTP", "http")
-			cReq, cResp, err := suite.RoundTripper.CaptureRoundTrip(req)
-			if err != nil {
-				t.Errorf("failed to get expected response: %v", err)
-			}
-
-			if err := http.CompareRequest(t, &req, cReq, cResp, expectedResponse); err != nil {
-				t.Errorf("failed to compare request and response: %v", err)
-			}
+			http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectedResponse)
 		})
 	},
 }

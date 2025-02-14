@@ -9,12 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/envoyproxy/gateway/api/v1alpha1"
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 )
 
 type Info struct {
@@ -22,6 +23,7 @@ type Info struct {
 	GatewayAPIVersion   string `json:"gatewayAPIVersion"`
 	EnvoyProxyVersion   string `json:"envoyProxyVersion"`
 	GitCommitID         string `json:"gitCommitID"`
+	GolangVersion       string `json:"golangVersion"`
 }
 
 func Get() Info {
@@ -30,13 +32,14 @@ func Get() Info {
 		GatewayAPIVersion:   gatewayAPIVersion,
 		EnvoyProxyVersion:   envoyProxyVersion,
 		GitCommitID:         gitCommitID,
+		GolangVersion:       runtime.Version(),
 	}
 }
 
 var (
 	envoyGatewayVersion string
 	gatewayAPIVersion   string
-	envoyProxyVersion   = strings.Split(*v1alpha1.DefaultKubernetesContainerImage(v1alpha1.DefaultEnvoyProxyImage), ":")[1]
+	envoyProxyVersion   = strings.Split(egv1a1.DefaultEnvoyProxyImage, ":")[1]
 	gitCommitID         string
 )
 
@@ -68,6 +71,7 @@ func Print(w io.Writer, format string) error {
 		_, _ = fmt.Fprintf(w, "ENVOY_PROXY_VERSION: %s\n", v.EnvoyProxyVersion)
 		_, _ = fmt.Fprintf(w, "GATEWAYAPI_VERSION: %s\n", v.GatewayAPIVersion)
 		_, _ = fmt.Fprintf(w, "GIT_COMMIT_ID: %s\n", v.GitCommitID)
+		_, _ = fmt.Fprintf(w, "GOLANG_VERSION: %s\n", v.GolangVersion)
 	}
 
 	return nil
