@@ -6,7 +6,6 @@
 package proxy
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"sort"
@@ -30,9 +29,8 @@ import (
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
 	"github.com/envoyproxy/gateway/internal/gatewayapi"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/utils/test"
 )
-
-var overrideTestData = flag.Bool("override-testdata", false, "if override the test output data.")
 
 const (
 	// envoyHTTPPort is the container port number of Envoy's HTTP endpoint.
@@ -43,6 +41,15 @@ const (
 
 func newTestInfra() *ir.Infra {
 	return newTestInfraWithAnnotations(nil)
+}
+
+func newTestInfraWithNamespace(namespace string) *ir.Infra {
+	i := ir.NewInfra()
+	i.Proxy.Namespace = namespace
+	i.Proxy.GetProxyMetadata().Labels[gatewayapi.OwningGatewayNamespaceLabel] = namespace
+	i.Proxy.GetProxyMetadata().Labels[gatewayapi.OwningGatewayNameLabel] = i.Proxy.Name
+
+	return i
 }
 
 func newTestInfraWithIPFamily(family *egv1a1.IPFamily) *ir.Infra {
@@ -120,16 +127,17 @@ func TestDeployment(t *testing.T) {
 	require.NoError(t, err)
 
 	cases := []struct {
-		caseName        string
-		infra           *ir.Infra
-		deploy          *egv1a1.KubernetesDeploymentSpec
-		shutdown        *egv1a1.ShutdownConfig
-		shutdownManager *egv1a1.ShutdownManager
-		proxyLogging    map[egv1a1.ProxyLogComponent]egv1a1.LogLevel
-		bootstrap       string
-		telemetry       *egv1a1.ProxyTelemetry
-		concurrency     *int32
-		extraArgs       []string
+		caseName             string
+		infra                *ir.Infra
+		deploy               *egv1a1.KubernetesDeploymentSpec
+		shutdown             *egv1a1.ShutdownConfig
+		shutdownManager      *egv1a1.ShutdownManager
+		proxyLogging         map[egv1a1.ProxyLogComponent]egv1a1.LogLevel
+		bootstrap            string
+		telemetry            *egv1a1.ProxyTelemetry
+		concurrency          *int32
+		extraArgs            []string
+		gatewayNamespaceMode bool
 	}{
 		{
 			caseName: "default",
@@ -560,6 +568,11 @@ func TestDeployment(t *testing.T) {
 				Name: ptr.To("custom-deployment-name"),
 			},
 		},
+		{
+			caseName:             "gateway-namespace-mode",
+			infra:                newTestInfraWithNamespace("ns1"),
+			gatewayNamespaceMode: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -604,12 +617,25 @@ func TestDeployment(t *testing.T) {
 			if len(tc.extraArgs) > 0 {
 				tc.infra.Proxy.Config.Spec.ExtraArgs = tc.extraArgs
 			}
+			infraNamespace := cfg.ControllerNamespace
+			if tc.gatewayNamespaceMode {
+				deployType := egv1a1.KubernetesDeployModeType(egv1a1.KubernetesDeployModeTypeGatewayNamespace)
+				cfg.EnvoyGateway.Provider = &egv1a1.EnvoyGatewayProvider{
+					Type: egv1a1.ProviderTypeKubernetes,
+					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
+						Deploy: &egv1a1.KubernetesDeployMode{
+							Type: &deployType,
+						},
+					},
+				}
+				infraNamespace = tc.infra.GetProxyInfra().Namespace
+			}
 
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			r := NewResourceRender(infraNamespace, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
 			dp, err := r.Deployment()
 			require.NoError(t, err)
 
-			if *overrideTestData {
+			if test.OverrideTestData() {
 				deploymentYAML, err := yaml.Marshal(dp)
 				require.NoError(t, err)
 				// nolint: gosec
@@ -1034,7 +1060,7 @@ func TestDaemonSet(t *testing.T) {
 				tc.infra.Proxy.Config.Spec.ExtraArgs = tc.extraArgs
 			}
 
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			r := NewResourceRender(cfg.ControllerNamespace, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
 			ds, err := r.DaemonSet()
 			require.NoError(t, err)
 
@@ -1047,7 +1073,7 @@ func TestDaemonSet(t *testing.T) {
 				})
 			}
 
-			if *overrideTestData {
+			if test.OverrideTestData() {
 				deploymentYAML, err := yaml.Marshal(ds)
 				require.NoError(t, err)
 				// nolint: gosec
@@ -1199,7 +1225,7 @@ func TestService(t *testing.T) {
 				provider.EnvoyService = tc.service
 			}
 
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			r := NewResourceRender(cfg.ControllerNamespace, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
 			svc, err := r.Service()
 			require.NoError(t, err)
 
@@ -1242,8 +1268,8 @@ func TestConfigMap(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
-			cm, err := r.ConfigMap()
+			r := NewResourceRender(cfg.ControllerNamespace, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			cm, err := r.ConfigMap("")
 			require.NoError(t, err)
 
 			expected, err := loadConfigmap(tc.name)
@@ -1268,26 +1294,55 @@ func TestServiceAccount(t *testing.T) {
 	cfg, err := config.New(os.Stdout)
 	require.NoError(t, err)
 	cases := []struct {
-		name  string
-		infra *ir.Infra
+		name                 string
+		infra                *ir.Infra
+		gatewayNamespaceMode bool
 	}{
 		{
 			name:  "default",
 			infra: newTestInfra(),
-		}, {
+		},
+		{
 			name: "with-annotations",
 			infra: newTestInfraWithAnnotations(map[string]string{
 				"anno1": "value1",
 				"anno2": "value2",
 			}),
 		},
+		{
+			name:                 "gateway-namespace-mode",
+			infra:                newTestInfraWithNamespace("ns1"),
+			gatewayNamespaceMode: true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			ns := cfg.ControllerNamespace
+			if tc.gatewayNamespaceMode {
+				deployType := egv1a1.KubernetesDeployModeType(egv1a1.KubernetesDeployModeTypeGatewayNamespace)
+				cfg.EnvoyGateway.Provider = &egv1a1.EnvoyGatewayProvider{
+					Type: egv1a1.ProviderTypeKubernetes,
+					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
+						Deploy: &egv1a1.KubernetesDeployMode{
+							Type: &deployType,
+						},
+					},
+				}
+				ns = tc.infra.GetProxyInfra().Namespace
+			}
+			r := NewResourceRender(ns, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
 			sa, err := r.ServiceAccount()
 			require.NoError(t, err)
+
+			if test.OverrideTestData() {
+				saYAML, err := yaml.Marshal(sa)
+				require.NoError(t, err)
+				// nolint: gosec
+				err = os.WriteFile(fmt.Sprintf("testdata/serviceaccount/%s.yaml", tc.name), saYAML, 0o644)
+				require.NoError(t, err)
+				return
+			}
 
 			expected, err := loadServiceAccount(tc.name)
 			require.NoError(t, err)
@@ -1400,7 +1455,7 @@ func TestPDB(t *testing.T) {
 
 			provider.GetEnvoyProxyKubeProvider()
 
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			r := NewResourceRender(cfg.ControllerNamespace, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
 
 			pdb, err := r.PodDisruptionBudget()
 			require.NoError(t, err)
@@ -1512,7 +1567,7 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 			}
 			provider.GetEnvoyProxyKubeProvider()
 
-			r := NewResourceRender(cfg.Namespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
+			r := NewResourceRender(cfg.ControllerNamespace, cfg.ControllerNamespace, cfg.DNSDomain, tc.infra.GetProxyInfra(), cfg.EnvoyGateway)
 			hpa, err := r.HorizontalPodAutoscaler()
 			require.NoError(t, err)
 
