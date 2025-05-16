@@ -380,6 +380,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-1
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-1
+      namespace: envoy-gateway-system
   envoy-gateway/gateway-2:
     proxy:
       listeners:
@@ -395,6 +396,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-2
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-2
+      namespace: envoy-gateway-system
 xdsIR:
   envoy-gateway/gateway-1:
     accessLog:
@@ -434,7 +436,6 @@ xdsIR:
           namespace: default
         name: grpcroute/default/grpcroute-1/rule/0/match/-1/*
         traffic:
-          name: envoy-gateway/policy-for-gateway
           retry:
             perRetry:
               backOff:
@@ -537,7 +538,6 @@ xdsIR:
           name: ""
           prefix: /
         traffic:
-          name: default/policy-for-route-1
           retry:
             numRetries: 5
             perRetry:

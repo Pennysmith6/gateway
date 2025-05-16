@@ -16,6 +16,7 @@ backendTrafficPolicies:
           limit:
             requests: 20
             unit: Hour
+          shared: true
         - clientSelectors:
           - sourceCIDR:
               type: Distinct
@@ -23,7 +24,7 @@ backendTrafficPolicies:
           limit:
             requests: 20
             unit: Hour
-        shared: true
+          shared: true
       type: Global
     targetRef:
       group: gateway.networking.k8s.io
@@ -66,7 +67,7 @@ backendTrafficPolicies:
           limit:
             requests: 10
             unit: Hour
-        shared: true
+          shared: true
       type: Global
     targetRef:
       group: gateway.networking.k8s.io
@@ -256,6 +257,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-1
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-1
+      namespace: envoy-gateway-system
   envoy-gateway/gateway-2:
     proxy:
       listeners:
@@ -271,6 +273,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-2
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-2
+      namespace: envoy-gateway-system
 xdsIR:
   envoy-gateway/gateway-1:
     accessLog:
@@ -310,7 +313,6 @@ xdsIR:
           namespace: default
         name: grpcroute/default/grpcroute-1/rule/0/match/-1/*
         traffic:
-          name: envoy-gateway/policy-for-gateway
           rateLimit:
             global:
               rules:
@@ -327,7 +329,8 @@ xdsIR:
                 limit:
                   requests: 10
                   unit: Hour
-              shared: true
+                name: envoy-gateway/policy-for-gateway/rule/0
+                shared: true
     readyListener:
       address: 0.0.0.0
       ipFamily: IPv4
@@ -375,7 +378,6 @@ xdsIR:
           name: ""
           prefix: /
         traffic:
-          name: default/policy-for-route
           rateLimit:
             global:
               rules:
@@ -389,6 +391,8 @@ xdsIR:
                 limit:
                   requests: 20
                   unit: Hour
+                name: default/policy-for-route/rule/0
+                shared: true
               - cidrMatch:
                   cidr: ::/64
                   distinct: true
@@ -399,7 +403,8 @@ xdsIR:
                 limit:
                   requests: 20
                   unit: Hour
-              shared: true
+                name: default/policy-for-route/rule/1
+                shared: true
     readyListener:
       address: 0.0.0.0
       ipFamily: IPv4

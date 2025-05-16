@@ -202,6 +202,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-1
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-1
+      namespace: envoy-gateway-system
 xdsIR:
   envoy-gateway/gateway-1:
     accessLog:
@@ -245,8 +246,7 @@ xdsIR:
           name: ""
           prefix: /
         timeout: 2m10s
-        traffic:
-          name: default/policy-for-http-route-1
+        traffic: {}
         useClientProtocol: true
       - destination:
           name: httproute/default/httproute-2/rule/0
@@ -275,7 +275,6 @@ xdsIR:
             consistentHash:
               cookie:
                 name: test
-          name: envoy-gateway/policy-for-gateway
         useClientProtocol: true
     readyListener:
       address: 0.0.0.0

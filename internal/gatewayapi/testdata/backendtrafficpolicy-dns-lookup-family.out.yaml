@@ -304,6 +304,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-1
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-1
+      namespace: envoy-gateway-system
 securityPolicies:
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: SecurityPolicy
@@ -448,7 +449,6 @@ xdsIR:
             dnsRefreshRate: 5s
             lookupFamily: IPv6
             respectDnsTtl: false
-          name: default/backend-traffic-policy
       - destination:
           name: grpcroute/default/grpcroute-1/rule/0
           settings:
@@ -494,7 +494,6 @@ xdsIR:
             dnsRefreshRate: 5s
             lookupFamily: IPv6
             respectDnsTtl: false
-          name: default/backend-traffic-policy
     readyListener:
       address: 0.0.0.0
       ipFamily: IPv4

@@ -417,6 +417,7 @@ infraIR:
         labels:
           gateway.envoyproxy.io/owning-gatewayclass: envoy-gateway-class
       name: envoy-gateway-class
+      namespace: envoy-gateway-system
 securityPolicies:
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: SecurityPolicy
@@ -554,7 +555,6 @@ xdsIR:
             - x-header-8
             maxAge: 33m20s
         traffic:
-          name: default/policy-for-gateway
           tcpKeepalive:
             idleTime: 1200
             interval: 60
@@ -615,7 +615,6 @@ xdsIR:
             - x-header-8
             maxAge: 33m20s
         traffic:
-          name: default/policy-for-gateway
           tcpKeepalive:
             idleTime: 1200
             interval: 60

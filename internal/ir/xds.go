@@ -44,7 +44,6 @@ var (
 	ErrTLSPrivateKey                            = errors.New("field PrivateKey must be specified")
 	ErrRouteNameEmpty                           = errors.New("field Name must be specified")
 	ErrHTTPRouteHostnameEmpty                   = errors.New("field Hostname must be specified")
-	ErrRouteDestinationsFQDNMixed               = errors.New("mixed endpoints address type for the same route destination is not supported")
 	ErrDestinationNameEmpty                     = errors.New("field Name must be specified")
 	ErrDestEndpointHostInvalid                  = errors.New("field Address must be a valid IP or FQDN address")
 	ErrDestEndpointPortInvalid                  = errors.New("field Port specified is invalid")
@@ -290,6 +289,10 @@ type HTTPListener struct {
 	Hostnames []string `json:"hostnames" yaml:"hostnames"`
 	// Tls configuration. If omitted, the gateway will expose a plain text HTTP server.
 	TLS *TLSConfig `json:"tls,omitempty" yaml:"tls,omitempty"`
+	// TLSOverlaps indicates if the listener has TLS configuration that overlaps with other listeners.
+	// HTTP2 should be disabled if this is true to avoid the HTTP/2 Connection Coalescing issue (see https://gateway-api.sigs.k8s.io/geps/gep-3567/)
+	// We use a standalone field to avoid messing with the ClientTrafficPolicy ALPN config.
+	TLSOverlaps bool `json:"tlsOverlaps,omitempty" yaml:"tlsOverlaps,omitempty"`
 	// Routes associated with HTTP traffic to the service.
 	Routes []*HTTPRoute `json:"routes,omitempty" yaml:"routes,omitempty"`
 	// IsHTTP2 is set if the listener is configured to serve HTTP2 traffic,
@@ -832,8 +835,6 @@ type Compression struct {
 // TrafficFeatures holds the information associated with the Backend Traffic Policy.
 // +k8s:deepcopy-gen=true
 type TrafficFeatures struct {
-	// Name of the backend traffic policy and namespace
-	Name string `json:"name,omitempty"`
 	// RateLimit defines the more specific match conditions as well as limits for ratelimiting
 	// the requests on this route.
 	RateLimit *RateLimit `json:"rateLimit,omitempty" yaml:"rateLimit,omitempty"`
@@ -1093,6 +1094,11 @@ type OIDC struct {
 
 	// CookieDomain sets the domain of the cookies set by the oauth filter.
 	CookieDomain *string `json:"cookieDomain,omitempty"`
+
+	// Skips OIDC authentication when the request contains any header that will be extracted by the JWT
+	// filter, normally "Authorization: Bearer ...". This is typically used for non-browser clients that
+	// may not be able to handle OIDC redirects and wish to directly supply a token instead.
+	PassThroughAuthHeader bool `json:"passThroughAuthHeader,omitempty"`
 }
 
 // OIDCProvider defines the schema for the OIDC Provider.
@@ -1477,20 +1483,51 @@ func (r *RouteDestination) Validate() error {
 	if len(r.Name) == 0 {
 		errs = errors.Join(errs, ErrDestinationNameEmpty)
 	}
-	routeHasAddressTypes := make(sets.Set[DestinationAddressType])
 	for _, s := range r.Settings {
 		if err := s.Validate(); err != nil {
 			errs = errors.Join(errs, err)
 		}
-		if s.AddressType != nil {
-			routeHasAddressTypes.Insert(*s.AddressType)
-		}
-	}
-	if routeHasAddressTypes.Len() > 1 || routeHasAddressTypes.Has(MIXED) {
-		errs = errors.Join(ErrRouteDestinationsFQDNMixed)
 	}
 
 	return errs
+}
+
+func (r *RouteDestination) NeedsClusterPerSetting() bool {
+	return r.HasMixedEndpoints() ||
+		r.HasFiltersInSettings() ||
+		(len(r.Settings) > 1 && r.HasZoneAwareRouting())
+}
+
+// HasMixedEndpoints returns true if the RouteDestination has endpoints of multiple types
+func (r *RouteDestination) HasMixedEndpoints() bool {
+	destinationAddressTypes := sets.Set[DestinationAddressType]{}
+	for _, s := range r.Settings {
+		if s.AddressType != nil {
+			destinationAddressTypes.Insert(*s.AddressType)
+		}
+	}
+	return destinationAddressTypes.Len() > 1 || destinationAddressTypes.Has(MIXED)
+}
+
+// HasFiltersInSettings returns true if any setting in the destination has a filter
+func (r *RouteDestination) HasFiltersInSettings() bool {
+	for _, setting := range r.Settings {
+		filters := setting.Filters
+		if filters != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// HasZoneAwareRouting returns true if any setting in the destination has ZoneAwareRoutingEnabled set
+func (r *RouteDestination) HasZoneAwareRouting() bool {
+	for _, setting := range r.Settings {
+		if setting.ZoneAwareRoutingEnabled {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RouteDestination) ToBackendWeights() *BackendWeights {
@@ -1503,9 +1540,12 @@ func (r *RouteDestination) ToBackendWeights() *BackendWeights {
 			continue
 		}
 
-		if len(s.Endpoints) > 0 {
+		switch {
+		case s.IsDynamicResolver: // Dynamic resolver has no endpoints
 			w.Valid += *s.Weight
-		} else {
+		case len(s.Endpoints) > 0:
+			w.Valid += *s.Weight
+		default:
 			w.Invalid += *s.Weight
 		}
 	}
@@ -1518,6 +1558,11 @@ func (r *RouteDestination) ToBackendWeights() *BackendWeights {
 type DestinationSetting struct {
 	// Name of the setting
 	Name string `json:"name" yaml:"name"`
+
+	// IsDynamicResolver specifies whether the destination is a dynamic resolver.
+	// A dynamic resolver is a destination that is resolved dynamically using the request's host header.
+	IsDynamicResolver bool `json:"isDynamicResolver,omitempty" yaml:"isDynamicResolver,omitempty"`
+
 	// Weight associated with this destination,
 	// invalid endpoints are represents with a
 	// non-zero weight with an empty endpoints list
@@ -2051,16 +2096,7 @@ type GlobalRateLimit struct {
 	// TODO zhaohuabing: add default values for Global rate limiting.
 
 	// Rules for rate limiting.
-	Rules []*RateLimitRule `json:"rules,omitempty" yaml:"rules,omitempty"`
-
-	// Shared determines whether this rate limit rule applies globally across the gateway, or xRoute(s).
-	// If set to true, the rule is treated as a common bucket and is shared across all routes under the backend traffic policy.
-	// Must have targetRef set to Gateway or xRoute(s).
-	// Default: false.
-	//
-	// +optional
-	// +kubebuilder:default=false
-	Shared *bool `json:"shared,omitempty" yaml:"shared,omitempty"`
+	Rules []*RateLimitRule `json:"rules,omitempty" yaml:"rules,omitempty" patchStrategy:"merge" patchMergeKey:"name"`
 }
 
 // LocalRateLimit holds the local rate limiting configuration.
@@ -2071,7 +2107,7 @@ type LocalRateLimit struct {
 	Default RateLimitValue `json:"default,omitempty" yaml:"default,omitempty"`
 
 	// Rules for rate limiting.
-	Rules []*RateLimitRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+	Rules []*RateLimitRule `json:"rules,omitempty" yaml:"rules,omitempty" patchStrategy:"merge" patchMergeKey:"name"`
 }
 
 // RateLimitRule holds the match and limit configuration for ratelimiting.
@@ -2087,6 +2123,15 @@ type RateLimitRule struct {
 	RequestCost *RateLimitCost `json:"requestCost,omitempty" yaml:"requestCost,omitempty"`
 	// ResponseCost specifies the cost of the response.
 	ResponseCost *RateLimitCost `json:"responseCost,omitempty" yaml:"responseCost,omitempty"`
+	// Shared determines whether this rate limit rule applies globally across the gateway, or xRoute(s).
+	// If set to true, the rule is treated as a common bucket and is shared across all routes under the backend traffic policy.
+	// Must have targetRef set to Gateway or xRoute(s).
+	// Default: false.
+	//
+	// +optional
+	Shared *bool `json:"shared,omitempty" yaml:"shared,omitempty"`
+	// Name is a unique identifier for this rule, set as <policy-ns>/<policy-name>/rule/<rule-index>.
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
 }
 
 // RateLimitCost specifies the cost of the request or response.
@@ -2806,7 +2851,7 @@ type BackOffPolicy struct {
 // TLSUpstreamConfig contains sni and ca file in []byte format.
 // +k8s:deepcopy-gen=true
 type TLSUpstreamConfig struct {
-	SNI                 string            `json:"sni,omitempty" yaml:"sni,omitempty"`
+	SNI                 *string           `json:"sni,omitempty" yaml:"sni,omitempty"`
 	UseSystemTrustStore bool              `json:"useSystemTrustStore,omitempty" yaml:"useSystemTrustStore,omitempty"`
 	CACertificate       *TLSCACertificate `json:"caCertificate,omitempty" yaml:"caCertificate,omitempty"`
 	TLSConfig           `json:",inline"`
@@ -2814,8 +2859,9 @@ type TLSUpstreamConfig struct {
 
 func (t *TLSUpstreamConfig) ToTLSConfig() (*tls.Config, error) {
 	// nolint:gosec
-	tlsConfig := &tls.Config{
-		ServerName: t.SNI,
+	tlsConfig := &tls.Config{}
+	if t.SNI != nil {
+		tlsConfig.ServerName = *t.SNI
 	}
 	if t.MinVersion != nil {
 		tlsConfig.MinVersion = t.MinVersion.Int()

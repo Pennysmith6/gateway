@@ -123,6 +123,7 @@ infraIR:
           gateway.envoyproxy.io/owning-gateway-name: gateway-1
           gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway
       name: envoy-gateway/gateway-1
+      namespace: envoy-gateway-system
 xdsIR:
   envoy-gateway/gateway-1:
     accessLog:
@@ -168,7 +169,6 @@ xdsIR:
         traffic:
           httpUpgrade:
           - spdy/3.1
-          name: default/policy-for-route
     readyListener:
       address: 0.0.0.0
       ipFamily: IPv4
