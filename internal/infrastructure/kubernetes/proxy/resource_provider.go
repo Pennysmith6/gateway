@@ -6,6 +6,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -16,14 +17,18 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/gatewayapi"
+	gwapiresource "github.com/envoyproxy/gateway/internal/gatewayapi/resource"
 	"github.com/envoyproxy/gateway/internal/infrastructure/common"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/resource"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/utils"
 	"github.com/envoyproxy/gateway/internal/xds/bootstrap"
 )
 
@@ -37,35 +42,88 @@ const (
 	// XdsTLSCaFilepath is the fully qualified path of the file containing Envoy's
 	// trusted CA certificate.
 	XdsTLSCaFilepath = "/certs/ca.crt"
+
+	// XdsTLSCaFileName is the file name of the xDS server TLS certificate.
+	XdsTLSCaFileName = "ca.crt"
 )
 
 type ResourceRender struct {
 	infra *ir.ProxyInfra
 
-	// Namespace is the Namespace used for managed infra.
-	Namespace string
+	// envoyNamespace is the namespace used for managed infra.
+	envoyNamespace string
+
+	// controllerNamespace is the namespace used for Envoy Gateway controller.
+	controllerNamespace string
 
 	// DNSDomain is the dns domain used by k8s services. Defaults to "cluster.local".
 	DNSDomain string
 
 	ShutdownManager *egv1a1.ShutdownManager
+
+	GatewayNamespaceMode bool
+
+	// ownerReferenceUID store the uid of its owner reference. Key is the kind of owner resource.
+	// - Gateway when enabled GatewayNamespaceMode
+	// - TODO: GatewayClass when enabled merged gateways
+	ownerReferenceUID map[string]types.UID
 }
 
-func NewResourceRender(ns, dnsDomain string, infra *ir.ProxyInfra, gateway *egv1a1.EnvoyGateway) *ResourceRender {
-	return &ResourceRender{
-		Namespace:       ns,
-		DNSDomain:       dnsDomain,
-		infra:           infra,
-		ShutdownManager: gateway.GetEnvoyGatewayProvider().GetEnvoyGatewayKubeProvider().ShutdownManager,
+// KubernetesInfraProvider provide information for initializing the proxy resource render.
+type KubernetesInfraProvider interface {
+	GetControllerNamespace() string
+	GetDNSDomain() string
+	GetEnvoyGateway() *egv1a1.EnvoyGateway
+	GetOwnerReferenceUID(ctx context.Context, infra *ir.Infra) (map[string]types.UID, error)
+	GetResourceNamespace(ir *ir.Infra) string
+}
+
+func NewResourceRender(ctx context.Context, kubernetesInfra KubernetesInfraProvider, infra *ir.Infra) (*ResourceRender, error) {
+	ownerReference, err := kubernetesInfra.GetOwnerReferenceUID(ctx, infra)
+	if err != nil {
+		return nil, err
 	}
+
+	return &ResourceRender{
+		envoyNamespace:       kubernetesInfra.GetResourceNamespace(infra),
+		controllerNamespace:  kubernetesInfra.GetControllerNamespace(),
+		DNSDomain:            kubernetesInfra.GetDNSDomain(),
+		infra:                infra.GetProxyInfra(),
+		ShutdownManager:      kubernetesInfra.GetEnvoyGateway().GetEnvoyGatewayProvider().GetEnvoyGatewayKubeProvider().ShutdownManager,
+		GatewayNamespaceMode: kubernetesInfra.GetEnvoyGateway().GatewayNamespaceMode(),
+		ownerReferenceUID:    ownerReference,
+	}, nil
 }
 
 func (r *ResourceRender) Name() string {
 	return ExpectedResourceHashedName(r.infra.Name)
 }
 
+func (r *ResourceRender) Namespace() string {
+	return r.envoyNamespace
+}
+
+func (r *ResourceRender) ControllerNamespace() string {
+	return r.controllerNamespace
+}
+
 func (r *ResourceRender) LabelSelector() labels.Selector {
 	return labels.SelectorFromSet(r.stableSelector().MatchLabels)
+}
+
+func (r *ResourceRender) OwnerReferences() []metav1.OwnerReference {
+	var ownerReferences []metav1.OwnerReference
+	if r.ownerReferenceUID != nil && r.GatewayNamespaceMode {
+		if uid, ok := r.ownerReferenceUID[gwapiresource.KindGateway]; ok {
+			ownerReferences = append(ownerReferences, metav1.OwnerReference{
+				APIVersion: gwapiv1.GroupVersion.String(),
+				Kind:       r.infra.GetProxyMetadata().OwnerReference.Kind,
+				Name:       r.infra.GetProxyMetadata().OwnerReference.Name,
+				UID:        uid,
+			})
+		}
+	}
+	return ownerReferences
 }
 
 // ServiceAccount returns the expected proxy serviceAccount.
@@ -82,10 +140,11 @@ func (r *ResourceRender) ServiceAccount() (*corev1.ServiceAccount, error) {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   r.Namespace,
-			Name:        r.Name(),
-			Labels:      labels,
-			Annotations: r.infra.GetProxyMetadata().Annotations,
+			Namespace:       r.Namespace(),
+			Name:            r.Name(),
+			Labels:          labels,
+			Annotations:     r.infra.GetProxyMetadata().Annotations,
+			OwnerReferences: r.OwnerReferences(),
 		},
 	}, nil
 }
@@ -189,23 +248,24 @@ func (r *ResourceRender) Service() (*corev1.Service, error) {
 			Kind:       "Service",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   r.Namespace,
-			Labels:      svcLabels,
-			Annotations: annotations,
+			Namespace:       r.Namespace(),
+			Labels:          svcLabels,
+			Annotations:     annotations,
+			OwnerReferences: r.OwnerReferences(),
 		},
 		Spec: serviceSpec,
 	}
 
 	// set name
 	if envoyServiceConfig.Name != nil {
-		svc.ObjectMeta.Name = *envoyServiceConfig.Name
+		svc.Name = *envoyServiceConfig.Name
 	} else {
-		svc.ObjectMeta.Name = r.Name()
+		svc.Name = r.Name()
 	}
 
 	// apply merge patch to service
 	var err error
-	if svc, err = envoyServiceConfig.ApplyMergePatch(svc); err != nil {
+	if svc, err = utils.MergeWithPatch(svc, envoyServiceConfig.Patch); err != nil {
 		return nil, err
 	}
 
@@ -213,11 +273,19 @@ func (r *ResourceRender) Service() (*corev1.Service, error) {
 }
 
 // ConfigMap returns the expected ConfigMap based on the provided infra.
-func (r *ResourceRender) ConfigMap() (*corev1.ConfigMap, error) {
+func (r *ResourceRender) ConfigMap(cert string) (*corev1.ConfigMap, error) {
 	// Set the labels based on the owning gateway name.
 	labels := envoyLabels(r.infra.GetProxyMetadata().Labels)
 	if OwningGatewayLabelsAbsent(labels) {
 		return nil, fmt.Errorf("missing owning gateway labels")
+	}
+
+	data := map[string]string{
+		common.SdsCAFilename:   common.GetSdsCAConfigMapData(XdsTLSCaFilepath),
+		common.SdsCertFilename: common.GetSdsCertConfigMapData(XdsTLSCertFilepath, XdsTLSKeyFilepath),
+	}
+	if cert != "" {
+		data[XdsTLSCaFileName] = cert
 	}
 
 	return &corev1.ConfigMap{
@@ -226,15 +294,13 @@ func (r *ResourceRender) ConfigMap() (*corev1.ConfigMap, error) {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   r.Namespace,
-			Name:        r.Name(),
-			Labels:      labels,
-			Annotations: r.infra.GetProxyMetadata().Annotations,
+			Namespace:       r.Namespace(),
+			Name:            r.Name(),
+			Labels:          labels,
+			Annotations:     r.infra.GetProxyMetadata().Annotations,
+			OwnerReferences: r.OwnerReferences(),
 		},
-		Data: map[string]string{
-			common.SdsCAFilename:   common.GetSdsCAConfigMapData(XdsTLSCaFilepath),
-			common.SdsCertFilename: common.GetSdsCertConfigMapData(XdsTLSCertFilepath, XdsTLSKeyFilepath),
-		},
+		Data: data,
 	}, nil
 }
 
@@ -268,7 +334,7 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 	}
 
 	// Get expected bootstrap configurations rendered ProxyContainers
-	containers, err := expectedProxyContainers(r.infra, deploymentConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.Namespace, r.DNSDomain)
+	containers, err := expectedProxyContainers(r.infra, deploymentConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.ControllerNamespace(), r.DNSDomain, r.GatewayNamespaceMode)
 	if err != nil {
 		return nil, err
 	}
@@ -288,9 +354,10 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 			APIVersion: "apps/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   r.Namespace,
-			Labels:      dpLabels,
-			Annotations: dpAnnotations,
+			Namespace:       r.Namespace(),
+			Labels:          dpLabels,
+			Annotations:     dpAnnotations,
+			OwnerReferences: r.OwnerReferences(),
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: deploymentConfig.Replicas,
@@ -306,7 +373,6 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 					Containers:                    containers,
 					InitContainers:                deploymentConfig.InitContainers,
 					ServiceAccountName:            r.Name(),
-					AutomountServiceAccountToken:  ptr.To(false),
 					TerminationGracePeriodSeconds: expectedTerminationGracePeriodSeconds(proxyConfig.Spec.Shutdown),
 					DNSPolicy:                     corev1.DNSClusterFirst,
 					RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -314,7 +380,7 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 					SecurityContext:               deploymentConfig.Pod.SecurityContext,
 					Affinity:                      deploymentConfig.Pod.Affinity,
 					Tolerations:                   deploymentConfig.Pod.Tolerations,
-					Volumes:                       expectedVolumes(r.infra.Name, deploymentConfig.Pod),
+					Volumes:                       expectedVolumes(r.infra.Name, r.GatewayNamespaceMode, deploymentConfig.Pod, r.DNSDomain, r.controllerNamespace),
 					ImagePullSecrets:              deploymentConfig.Pod.ImagePullSecrets,
 					NodeSelector:                  deploymentConfig.Pod.NodeSelector,
 					TopologySpreadConstraints:     deploymentConfig.Pod.TopologySpreadConstraints,
@@ -327,13 +393,13 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 
 	// set name
 	if deploymentConfig.Name != nil {
-		deployment.ObjectMeta.Name = *deploymentConfig.Name
+		deployment.Name = *deploymentConfig.Name
 	} else {
-		deployment.ObjectMeta.Name = r.Name()
+		deployment.Name = r.Name()
 	}
 
 	// apply merge patch to deployment
-	if deployment, err = deploymentConfig.ApplyMergePatch(deployment); err != nil {
+	if deployment, err = utils.MergeWithPatch(deployment, deploymentConfig.Patch); err != nil {
 		return nil, err
 	}
 
@@ -357,7 +423,7 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 	}
 
 	// Get expected bootstrap configurations rendered ProxyContainers
-	containers, err := expectedProxyContainers(r.infra, daemonSetConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.Namespace, r.DNSDomain)
+	containers, err := expectedProxyContainers(r.infra, daemonSetConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.ControllerNamespace(), r.DNSDomain, r.GatewayNamespaceMode)
 	if err != nil {
 		return nil, err
 	}
@@ -377,9 +443,10 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 			APIVersion: "apps/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   r.Namespace,
-			Labels:      dsLabels,
-			Annotations: dsAnnotations,
+			Namespace:       r.Namespace(),
+			Labels:          dsLabels,
+			Annotations:     dsAnnotations,
+			OwnerReferences: r.OwnerReferences(),
 		},
 		Spec: appsv1.DaemonSetSpec{
 			// Daemonset's selector is immutable.
@@ -397,13 +464,13 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 
 	// set name
 	if daemonSetConfig.Name != nil {
-		daemonSet.ObjectMeta.Name = *daemonSetConfig.Name
+		daemonSet.Name = *daemonSetConfig.Name
 	} else {
-		daemonSet.ObjectMeta.Name = r.Name()
+		daemonSet.Name = r.Name()
 	}
 
-	// apply merge patch to daemonset
-	if daemonSet, err = daemonSetConfig.ApplyMergePatch(daemonSet); err != nil {
+	// apply merge patch to DaemonSet
+	if daemonSet, err = utils.MergeWithPatch(daemonSet, daemonSetConfig.Patch); err != nil {
 		return nil, err
 	}
 
@@ -445,8 +512,9 @@ func (r *ResourceRender) PodDisruptionBudget() (*policyv1.PodDisruptionBudget, e
 
 	podDisruptionBudget := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.Name(),
-			Namespace: r.Namespace,
+			Name:            r.Name(),
+			Namespace:       r.Namespace(),
+			OwnerReferences: r.OwnerReferences(),
 		},
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "policy/v1",
@@ -480,10 +548,11 @@ func (r *ResourceRender) HorizontalPodAutoscaler() (*autoscalingv2.HorizontalPod
 			Kind:       "HorizontalPodAutoscaler",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   r.Namespace,
-			Name:        r.Name(),
-			Annotations: r.infra.GetProxyMetadata().Annotations,
-			Labels:      r.infra.GetProxyMetadata().Labels,
+			Namespace:       r.Namespace(),
+			Name:            r.Name(),
+			Annotations:     r.infra.GetProxyMetadata().Annotations,
+			Labels:          r.infra.GetProxyMetadata().Labels,
+			OwnerReferences: r.OwnerReferences(),
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -505,8 +574,8 @@ func (r *ResourceRender) HorizontalPodAutoscaler() (*autoscalingv2.HorizontalPod
 		hpa.Spec.ScaleTargetRef.Name = r.Name()
 	}
 
-	hpa, err := hpaConfig.ApplyMergePatch(hpa)
-	if err != nil {
+	var err error
+	if hpa, err = utils.MergeWithPatch(hpa, hpaConfig.Patch); err != nil {
 		return nil, err
 	}
 
@@ -530,7 +599,6 @@ func (r *ResourceRender) getPodSpec(
 		Containers:                    containers,
 		InitContainers:                initContainers,
 		ServiceAccountName:            ExpectedResourceHashedName(r.infra.Name),
-		AutomountServiceAccountToken:  ptr.To(false),
 		TerminationGracePeriodSeconds: expectedTerminationGracePeriodSeconds(proxyConfig.Spec.Shutdown),
 		DNSPolicy:                     corev1.DNSClusterFirst,
 		RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -538,7 +606,7 @@ func (r *ResourceRender) getPodSpec(
 		SecurityContext:               pod.SecurityContext,
 		Affinity:                      pod.Affinity,
 		Tolerations:                   pod.Tolerations,
-		Volumes:                       expectedVolumes(r.infra.Name, pod),
+		Volumes:                       expectedVolumes(r.infra.Name, r.GatewayNamespaceMode, pod, r.DNSDomain, r.controllerNamespace),
 		ImagePullSecrets:              pod.ImagePullSecrets,
 		NodeSelector:                  pod.NodeSelector,
 		TopologySpreadConstraints:     pod.TopologySpreadConstraints,

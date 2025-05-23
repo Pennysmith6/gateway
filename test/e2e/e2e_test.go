@@ -51,6 +51,16 @@ func TestE2E(t *testing.T) {
 		)
 	}
 
+	// Skip Dynamic Resolver test because DNS resolver doesn't work properly in IPV6 Github worker
+	if tests.IPFamily == "ipv6" {
+		skipTests = append(skipTests,
+			tests.DynamicResolverBackendTest.ShortName,
+			tests.RateLimitCIDRMatchTest.ShortName,
+			tests.RateLimitMultipleListenersTest.ShortName,
+			tests.RateLimitGlobalSharedCidrMatchTest.ShortName,
+		)
+	}
+
 	cSuite, err := suite.NewConformanceTestSuite(suite.ConformanceOptions{
 		Client:               c,
 		RestConfig:           cfg,
@@ -61,7 +71,7 @@ func TestE2E(t *testing.T) {
 		RunTest:              *flags.RunTest,
 		// SupportedFeatures cannot be empty, so we set it to SupportGateway
 		// All e2e tests should leave Features empty.
-		SupportedFeatures: sets.New[features.FeatureName](features.SupportGateway),
+		SupportedFeatures: sets.New(features.SupportGateway),
 		SkipTests:         skipTests,
 		AllowCRDsMismatch: *flags.AllowCRDsMismatch,
 	})

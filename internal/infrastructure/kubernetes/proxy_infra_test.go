@@ -157,7 +157,7 @@ func TestCreateProxyInfra(t *testing.T) {
 				// Verify all resources were created via the fake kube client.
 				sa := &corev1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: kube.Namespace,
+						Namespace: kube.ControllerNamespace,
 						Name:      proxy.ExpectedResourceHashedName(tc.in.Proxy.Name),
 					},
 				}
@@ -165,7 +165,7 @@ func TestCreateProxyInfra(t *testing.T) {
 
 				cm := &corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: kube.Namespace,
+						Namespace: kube.ControllerNamespace,
 						Name:      proxy.ExpectedResourceHashedName(tc.in.Proxy.Name),
 					},
 				}
@@ -173,7 +173,7 @@ func TestCreateProxyInfra(t *testing.T) {
 
 				deploy := &appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: kube.Namespace,
+						Namespace: kube.ControllerNamespace,
 						Name:      proxy.ExpectedResourceHashedName(tc.in.Proxy.Name),
 					},
 				}
@@ -181,7 +181,7 @@ func TestCreateProxyInfra(t *testing.T) {
 
 				svc := &corev1.Service{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: kube.Namespace,
+						Namespace: kube.ControllerNamespace,
 						Name:      proxy.ExpectedResourceHashedName(tc.in.Proxy.Name),
 					},
 				}
@@ -222,4 +222,17 @@ func TestDeleteProxyInfra(t *testing.T) {
 			}
 		})
 	}
+}
+
+// This function uses setup for GatewayNamespace mode.
+// When enable GatewayNamespace mode, ProxyInfra Get OwnerReference from Gateway.
+func createGatewayForGatewayNamespaceMode(ctx context.Context, client *InfraClient) error {
+	gw := &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns1",
+			Name:      "gateway-1",
+			UID:       "foo.bar",
+		},
+	}
+	return client.Create(ctx, gw)
 }

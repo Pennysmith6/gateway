@@ -44,6 +44,9 @@ const (
 
 // Translator translates the xDS IR into xDS resources.
 type Translator struct {
+	// ControllerNamespace is the namespace of the Gateway API controller
+	ControllerNamespace string
+
 	// GlobalRateLimit holds the global rate limit settings
 	// required during xds translation.
 	GlobalRateLimit *GlobalRateLimitSettings
@@ -120,6 +123,14 @@ func (t *Translator) Translate(xdsIR *ir.Xds) (*types.ResourceVersionTable, erro
 	}
 
 	if err := processClusterForTracing(tCtx, xdsIR.Tracing, xdsIR.Metrics); err != nil {
+		errs = errors.Join(errs, err)
+	}
+
+	// Patch global resources that are shared across listeners and routes.
+	// - the envoy client certificate
+	// - the OIDC HMAC secret
+	// - the rate limit server cluster
+	if err := t.patchGlobalResources(tCtx, xdsIR); err != nil {
 		errs = errors.Join(errs, err)
 	}
 
@@ -413,13 +424,6 @@ func (t *Translator) processHTTPListenerXdsTranslation(
 		if err = patchResources(tCtx, httpListener.Routes); err != nil {
 			errs = errors.Join(errs, err)
 		}
-
-		// RateLimit filter is handled separately because it relies on the global
-		// rate limit server configuration.
-		// Check if a ratelimit cluster exists, if not, add it, if it's needed.
-		if err = t.createRateLimitServiceCluster(tCtx, httpListener, metrics); err != nil {
-			errs = errors.Join(errs, err)
-		}
 	}
 
 	return errs
@@ -480,7 +484,7 @@ func (t *Translator) addRouteToRouteConfig(
 
 		var xdsRoute *routev3.Route
 		// 1:1 between IR HTTPRoute and xDS config.route.v3.Route
-		xdsRoute, err = buildXdsRoute(httpRoute)
+		xdsRoute, err = buildXdsRoute(httpRoute, httpListener)
 		if err != nil {
 			// skip this route if failed to build xds route
 			errs = errors.Join(errs, err)
@@ -522,13 +526,14 @@ func (t *Translator) addRouteToRouteConfig(
 			var err error
 			// If there are no filters in the destination settings we create
 			// a regular xds Cluster
-			if !needsClusterPerSetting(httpRoute.Destination.Settings) {
+			if !httpRoute.Destination.NeedsClusterPerSetting() {
 				err = processXdsCluster(
 					tCtx,
 					httpRoute.Destination.Name,
 					httpRoute.Destination.Settings,
 					&HTTPRouteTranslator{httpRoute},
 					ea,
+					httpRoute.Destination.Metadata,
 				)
 				if err != nil {
 					errs = errors.Join(errs, err)
@@ -543,7 +548,8 @@ func (t *Translator) addRouteToRouteConfig(
 						setting.Name,
 						tSettings,
 						&HTTPRouteTranslator{httpRoute},
-						ea)
+						ea,
+						httpRoute.Destination.Metadata)
 					if err != nil {
 						errs = errors.Join(errs, err)
 					}
@@ -564,6 +570,7 @@ func (t *Translator) addRouteToRouteConfig(
 						tSocket:      nil,
 						endpointType: EndpointTypeStatic,
 						metrics:      metrics,
+						metadata:     mrr.Destination.Metadata,
 					}); err != nil {
 						errs = errors.Join(errs, err)
 					}
@@ -690,7 +697,8 @@ func (t *Translator) processTCPListenerXdsTranslation(
 				route.Destination.Name,
 				route.Destination.Settings,
 				&TCPRouteTranslator{route},
-				&ExtraArgs{metrics: metrics}); err != nil {
+				&ExtraArgs{metrics: metrics},
+				route.Destination.Metadata); err != nil {
 				errs = errors.Join(errs, err)
 			}
 			if route.TLS != nil && route.TLS.Terminate != nil {
@@ -781,7 +789,8 @@ func processUDPListenerXdsTranslation(
 				route.Destination.Name,
 				route.Destination.Settings,
 				&UDPRouteTranslator{route},
-				&ExtraArgs{metrics: metrics}); err != nil {
+				&ExtraArgs{metrics: metrics},
+				route.Destination.Metadata); err != nil {
 				errs = errors.Join(errs, err)
 			}
 		}
@@ -879,8 +888,9 @@ func processXdsCluster(tCtx *types.ResourceVersionTable,
 	settings []*ir.DestinationSetting,
 	route clusterArgs,
 	extras *ExtraArgs,
+	metadata *ir.ResourceMetadata,
 ) error {
-	return addXdsCluster(tCtx, route.asClusterArgs(name, settings, extras))
+	return addXdsCluster(tCtx, route.asClusterArgs(name, settings, extras, metadata))
 }
 
 // findXdsSecret finds a xds secret with the same name, and returns nil if there is no match.
@@ -940,13 +950,19 @@ func addXdsCluster(tCtx *types.ResourceVersionTable, args *xdsClusterArgs) error
 		}
 	}
 	// Use EDS for static endpoints
-	if args.endpointType == EndpointTypeStatic {
+	switch args.endpointType {
+	case EndpointTypeStatic:
 		if err := tCtx.AddXdsResource(resourcev3.EndpointType, xdsEndpoints); err != nil {
 			return err
 		}
-	} else {
+	case EndpointTypeDNS:
 		xdsCluster.LoadAssignment = xdsEndpoints
+	case EndpointTypeDynamicResolver:
+		// Dynamic resolver has no endpoints
+		// This assignment is not necessary, but it is added for clarity.
+		xdsCluster.LoadAssignment = nil
 	}
+
 	if err := tCtx.AddXdsResource(resourcev3.ClusterType, xdsCluster); err != nil {
 		return err
 	}
@@ -1018,31 +1034,62 @@ func buildXdsUpstreamTLSCASecret(tlsConfig *ir.TLSUpstreamConfig) *tlsv3.Secret 
 }
 
 func buildXdsUpstreamTLSSocketWthCert(tlsConfig *ir.TLSUpstreamConfig) (*corev3.TransportSocket, error) {
+	validationContext := &tlsv3.CommonTlsContext_CombinedCertificateValidationContext{
+		ValidationContextSdsSecretConfig: &tlsv3.SdsSecretConfig{
+			Name:      tlsConfig.CACertificate.Name,
+			SdsConfig: makeConfigSource(),
+		},
+		DefaultValidationContext: &tlsv3.CertificateValidationContext{},
+	}
+
+	if tlsConfig.SNI != nil {
+		validationContext.DefaultValidationContext.MatchTypedSubjectAltNames = []*tlsv3.SubjectAltNameMatcher{
+			{
+				SanType: tlsv3.SubjectAltNameMatcher_DNS,
+				Matcher: &matcherv3.StringMatcher{
+					MatchPattern: &matcherv3.StringMatcher_Exact{
+						Exact: *tlsConfig.SNI,
+					},
+				},
+			},
+		}
+		for _, san := range tlsConfig.SubjectAltNames {
+			var sanType tlsv3.SubjectAltNameMatcher_SanType
+			var value string
+
+			// Exactly one of san.Hostname or san.URI is guaranteed to be set
+			if san.Hostname != nil {
+				sanType = tlsv3.SubjectAltNameMatcher_DNS
+				value = *san.Hostname
+			} else if san.URI != nil {
+				sanType = tlsv3.SubjectAltNameMatcher_URI
+				value = *san.URI
+			}
+			validationContext.DefaultValidationContext.MatchTypedSubjectAltNames = append(
+				validationContext.DefaultValidationContext.MatchTypedSubjectAltNames,
+				&tlsv3.SubjectAltNameMatcher{
+					SanType: sanType,
+					Matcher: &matcherv3.StringMatcher{
+						MatchPattern: &matcherv3.StringMatcher_Exact{
+							Exact: value,
+						},
+					},
+				},
+			)
+		}
+	}
+
 	tlsCtx := &tlsv3.UpstreamTlsContext{
 		CommonTlsContext: &tlsv3.CommonTlsContext{
 			TlsCertificateSdsSecretConfigs: nil,
 			ValidationContextType: &tlsv3.CommonTlsContext_CombinedValidationContext{
-				CombinedValidationContext: &tlsv3.CommonTlsContext_CombinedCertificateValidationContext{
-					ValidationContextSdsSecretConfig: &tlsv3.SdsSecretConfig{
-						Name:      tlsConfig.CACertificate.Name,
-						SdsConfig: makeConfigSource(),
-					},
-					DefaultValidationContext: &tlsv3.CertificateValidationContext{
-						MatchTypedSubjectAltNames: []*tlsv3.SubjectAltNameMatcher{
-							{
-								SanType: tlsv3.SubjectAltNameMatcher_DNS,
-								Matcher: &matcherv3.StringMatcher{
-									MatchPattern: &matcherv3.StringMatcher_Exact{
-										Exact: tlsConfig.SNI,
-									},
-								},
-							},
-						},
-					},
-				},
+				CombinedValidationContext: validationContext,
 			},
 		},
-		Sni: tlsConfig.SNI,
+	}
+
+	if tlsConfig.SNI != nil {
+		tlsCtx.Sni = *tlsConfig.SNI
 	}
 
 	tlsParams := buildTLSParams(&tlsConfig.TLSConfig)

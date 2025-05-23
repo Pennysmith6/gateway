@@ -532,7 +532,7 @@ func (t *Translator) buildExtProc(
 			NamespaceDerefOr(extProc.BackendRefs[0].Namespace, policy.Namespace))
 	}
 
-	traffic, err := translateTrafficFeatures(extProc.BackendCluster.BackendSettings)
+	traffic, err := translateTrafficFeatures(extProc.BackendSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -614,11 +614,15 @@ func (t *Translator) buildWasms(
 	policy *egv1a1.EnvoyExtensionPolicy,
 	resources *resource.Resources,
 ) ([]ir.Wasm, error) {
+	var wasmIRList []ir.Wasm
+
+	if len(policy.Spec.Wasm) == 0 {
+		return wasmIRList, nil
+	}
+
 	if t.WasmCache == nil {
 		return nil, fmt.Errorf("wasm cache is not initialized")
 	}
-
-	var wasmIRList []ir.Wasm
 
 	if policy == nil {
 		return nil, nil

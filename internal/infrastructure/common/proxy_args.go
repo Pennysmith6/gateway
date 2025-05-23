@@ -27,12 +27,14 @@ func BuildProxyArgs(
 	shutdownConfig *egv1a1.ShutdownConfig,
 	bootstrapConfigOptions *bootstrap.RenderBootstrapConfigOptions,
 	serviceNode string,
+	gatewayNamespaceMode bool,
 ) ([]string, error) {
 	// If IPFamily is not set, try to determine it from the infrastructure.
 	if bootstrapConfigOptions != nil && bootstrapConfigOptions.IPFamily == nil {
 		bootstrapConfigOptions.IPFamily = getIPFamily(infra)
 	}
 
+	bootstrapConfigOptions.GatewayNamespaceMode = gatewayNamespaceMode
 	bootstrapConfigurations, err := bootstrap.GetRenderedBootstrapConfig(bootstrapConfigOptions)
 	if err != nil {
 		return nil, err
@@ -65,6 +67,9 @@ func BuildProxyArgs(
 
 	if componentsLogLevel := logging.GetEnvoyProxyComponentLevel(); componentsLogLevel != "" {
 		args = append(args, fmt.Sprintf("--component-log-level %s", componentsLogLevel))
+	} else {
+		// Default to error level for misc components if not set.
+		args = append(args, fmt.Sprintf("--component-log-level %s", "misc:error"))
 	}
 
 	// Default drain timeout.
