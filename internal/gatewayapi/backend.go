@@ -40,6 +40,31 @@ func (t *Translator) ProcessBackends(backends []*egv1a1.Backend) []*egv1a1.Backe
 }
 
 func validateBackend(backend *egv1a1.Backend) status.Error {
+	if backend.Spec.Type != nil &&
+		*backend.Spec.Type == egv1a1.BackendTypeDynamicResolver {
+		if len(backend.Spec.Endpoints) > 0 {
+			return status.NewRouteStatusError(
+				fmt.Errorf("DynamicResolver type cannot have endpoints specified"),
+				status.RouteReasonInvalidBackendRef,
+			)
+		}
+	} else {
+		if backend.Spec.TLS != nil {
+			if backend.Spec.TLS.WellKnownCACertificates != nil {
+				return status.NewRouteStatusError(
+					fmt.Errorf("TLS.WellKnownCACertificates settings can only be specified for DynamicResolver backends"),
+					status.RouteReasonInvalidBackendRef,
+				)
+			}
+			if len(backend.Spec.TLS.CACertificateRefs) > 0 {
+				return status.NewRouteStatusError(
+					fmt.Errorf("TLS.CACertificateRefs settings can only be specified for DynamicResolver backends"),
+					status.RouteReasonInvalidBackendRef,
+				)
+			}
+		}
+	}
+
 	for _, ep := range backend.Spec.Endpoints {
 		if ep.FQDN != nil {
 			hostname := ep.FQDN.Hostname
